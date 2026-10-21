@@ -682,11 +682,11 @@ function AnimatedReasoning({
     // reopened card's track glide all change this body after the commit, so the
     // pin above cannot see them. Keep pinning through that window, never
     // against a reader who has taken the position.
-    if (running) return
+    if (running || !expanded) return
     const el = thinkBodyRef.current
     if (el === null) return
     const timers = [120, 500, 1200, 2500].map(delay => setTimeout(() => {
-      if (expanded && !userScrolledRef.current) pinToNewestLine(el, pinnedTopRef)
+      if (!userScrolledRef.current) pinToNewestLine(el, pinnedTopRef)
     }, delay))
     return () => {
       for (const timer of timers) clearTimeout(timer)
@@ -704,6 +704,10 @@ function AnimatedReasoning({
     const onScroll = () => {
       if (el.scrollHeight - el.scrollTop - el.clientHeight <= 30) {
         userScrolledRef.current = false
+        // Record the line the reader came back to. While the pause was on, the
+        // body kept growing, so the line the pin last wrote is now far above
+        // this one and would swallow the next short upward gesture.
+        pinnedTopRef.current = el.scrollTop
       } else if (el.scrollTop < pinnedTopRef.current - 2) {
         userScrolledRef.current = true
       }
