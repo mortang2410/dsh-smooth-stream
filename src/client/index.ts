@@ -174,6 +174,7 @@ function readBootConfig(): StreamConfig {
     || typeof (raw as StreamConfig).revealCharsPerSec !== 'number'
     || typeof (raw as StreamConfig).scrollSpeedPxPerSec !== 'number'
     || typeof (raw as StreamConfig).maxScrollSpeedPxPerSec !== 'number'
+    || typeof (raw as StreamConfig).controlScroll !== 'boolean'
   ) {
     throw new Error(`[dsh-smooth-stream] malformed ${STREAM_BOOT_GLOBAL} boot global: ${JSON.stringify(raw)}`)
   }
@@ -229,13 +230,20 @@ function wrapAgentChatRows(
 /**
  * A live settings cell shared by the renderer lifecycle and React views. It
  * starts on the shared defaults and follows the plugin-owned controller once
- * the optional settings services arrive.
+ * the optional settings services arrive. The composition default for
+ * `controlScroll` seeds the start: on dsh 0.2.x that value is false, so the
+ * follow engine stays out of the conversation scrollport even before the
+ * settings read resolves, and it keeps staying out if the read fails.
  */
 class SettingsCell {
   private readonly listeners = new Set<() => void>()
   private card: SmoothStreamCardController | undefined
-  private value: StreamSettings = DEFAULT_STREAM_SETTINGS
+  private value: StreamSettings
   private pending = false
+
+  constructor(initialControlScroll: boolean = DEFAULT_STREAM_SETTINGS.controlScroll) {
+    this.value = { ...DEFAULT_STREAM_SETTINGS, controlScroll: initialControlScroll }
+  }
 
   /** Re-point the cell at the plugin-owned settings controller. */
   attach(card: SmoothStreamCardController): () => void {
@@ -311,7 +319,7 @@ class SettingsCell {
  */
 export function apply(ctx: ClientContext): void {
   const config = readBootConfig()
-  const settings = new SettingsCell()
+  const settings = new SettingsCell(config.controlScroll)
   const useControlScroll = (): boolean => useSyncExternalStore(
     settings.subscribe,
     () => settings.getSnapshot().controlScroll,
