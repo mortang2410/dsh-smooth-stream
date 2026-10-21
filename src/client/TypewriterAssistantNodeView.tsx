@@ -522,10 +522,11 @@ function AnimatedReasoning({
   const localFadeSpeedRef = useRef(35)
   const fadeSpeedRef = followSpeedCpsRef ?? localFadeSpeedRef
   const userScrolledRef = useRef(false)
-  // Where the follow last left this body. A scroll that lands above it is
-  // the reader moving up; the pin never writes anywhere else, so no pointer
-  // or wheel bookkeeping is needed to tell the two apart, and a touch pan
-  // (which cancels the pointer stream) still counts.
+  // Where the follow last left this body. Written in exactly two places: the
+  // pin helper, and the at-bottom branch of the scroll handler, which records
+  // the line the reader came back to. A scroll that lands above it is the
+  // reader moving up, so no pointer or wheel bookkeeping is needed to tell the
+  // two apart, and a touch pan (which cancels the pointer stream) counts.
   const pinnedTopRef = useRef(0)
   const commitAnchorRef = useRef<HTMLDivElement>(null)
   // The running鈫抐alse flip is the AUTO-close: it collapses instantly and the
