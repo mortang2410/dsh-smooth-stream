@@ -508,12 +508,6 @@ function AnimatedReasoning({
   const localFadeSpeedRef = useRef(35)
   const fadeSpeedRef = followSpeedCpsRef ?? localFadeSpeedRef
   const userScrolledRef = useRef(false)
-  const rafIdRef = useRef(0)
-  // Latest "the live stream still owns this scroller" state. Tracked on every
-  // render so the queued frame can re-read it: a stop or a collapse landing
-  // between scheduling and the frame must not move the viewport.
-  const followActiveRef = useRef(false)
-  followActiveRef.current = running && expanded
   const commitAnchorRef = useRef<HTMLDivElement>(null)
   // The running鈫抐alse flip is the AUTO-close: it collapses instantly and the
   // follower's settle spring absorbs the height step. A later manual toggle
@@ -655,36 +649,52 @@ function AnimatedReasoning({
     notifyFollowCommit(commitAnchorRef.current)
   }, [running, thinkAutoExpand])
 
-  useEffect(() => {
-    // Only the live stream owns the reading position. A settled block is
-    // something to read from the top, so expanding a finished reasoning card
-    // must not scroll it 鈥?that would make its first lines unreachable.
-    if (!running || !expanded || userScrolledRef.current) return
+  // The body belongs on its newest line whenever the card is open and the
+  // reader has not scrolled it. Pinning on open matters because the auto-close
+  // at the end of a stream leaves a finished card collapsed; reopening it by
+  // hand, or by another plugin such as dsh-think-expand, would otherwise land
+  // on the first line, which is what "the bubble is stuck at the top" looks
+  // like. `followedRef` remembers that this body was pinned, so the settle
+  // window below only touches a body that had a live position to keep.
+  const followedRef = useRef(false)
+  useLayoutEffect(() => {
+    if (!expanded || userScrolledRef.current) return
     const el = thinkBodyRef.current
     if (el === null) return
-    if (rafIdRef.current === 0) {
-      rafIdRef.current = requestAnimationFrame(() => {
-        rafIdRef.current = 0
-        // Re-checked at frame time: the stream may have stopped, the block may
-        // have collapsed, or the user may have scrolled since scheduling. A
-        // queued frame never steals the position back.
-        if (!followActiveRef.current || userScrolledRef.current || el === null) return
-        const delta = el.scrollHeight - el.scrollTop - el.clientHeight
-        if (delta > 2) {
-          el.scrollTop = Number.MAX_SAFE_INTEGER
-        }
-      })
+    followedRef.current = true
+    // Same task as the commit that grew the body, before paint. Reading the
+    // geometry from a queued frame ran one reveal commit behind, so the newest
+    // line sat under the fold and the last commit of a stream was never
+    // followed at all: the body stopped one line short and stayed there.
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 2) {
+      // `scrollHeight`, not `Number.MAX_SAFE_INTEGER`: WebKit (Safari) ignores
+      // that value outright and leaves scrollTop at 0, so the follow silently
+      // did nothing in Safari while it clamped and worked in Chromium.
+      el.scrollTop = el.scrollHeight
     }
   }, [running, expanded, shown])
 
   useEffect(() => {
-    return () => {
-      if (rafIdRef.current !== 0) {
-        cancelAnimationFrame(rafIdRef.current)
-        rafIdRef.current = 0
+    // A settled turn re-renders its answer once more (streaming parse to the
+    // settled parse) and the conversation follower releases its transform. That
+    // reflow can change this body's wrapping a moment later, which leaves the
+    // newest line cut even though the body was pinned when the stream ended.
+    // Keep pinning for a short window after the tail ends, for a body that was
+    // pinned at least once (opening a card pins it too, see above).
+    if (running) return
+    const el = thinkBodyRef.current
+    if (el === null) return
+    const pin = (): void => {
+      if (!followedRef.current || !expanded || userScrolledRef.current) return
+      if (el.scrollHeight - el.scrollTop - el.clientHeight > 2) {
+        el.scrollTop = el.scrollHeight
       }
     }
-  }, [])
+    const timers = [120, 500, 1200, 2500].map(delay => setTimeout(pin, delay))
+    return () => {
+      for (const timer of timers) clearTimeout(timer)
+    }
+  }, [running, expanded])
 
   useEffect(() => {
     const el = thinkBodyRef.current
@@ -692,7 +702,12 @@ function AnimatedReasoning({
     let isPointerDown = false
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY < 0) {
-        userScrolledRef.current = true
+        // Reader intent is a wheel that actually moved this box up. A wheel over
+        // a body that cannot scroll up (still under the 300px cap, or already at
+        // its top) is scrolling the conversation instead, and latching a pause
+        // on it used to stop follow for the rest of the reasoning block: nothing
+        // scrolls the body back to the bottom, so nothing cleared the latch.
+        if (el.scrollTop > 0) userScrolledRef.current = true
       } else if (e.deltaY > 0) {
         if (el.scrollHeight - el.scrollTop - el.clientHeight <= 30) {
           userScrolledRef.current = false
@@ -715,14 +730,19 @@ function AnimatedReasoning({
     }
     el.addEventListener('wheel', onWheel, { passive: true })
     el.addEventListener('pointerdown', onPointerDown, { passive: true })
-    window.addEventListener('pointerup', onPointerUp, { passive: true })
-    window.addEventListener('pointercancel', onPointerUp, { passive: true })
+    // Capture on the window, plus blur: a release that lands on another window
+    // or never reaches this document would otherwise leave the press latched,
+    // and the next streamed scroll would look like a reader's drag.
+    window.addEventListener('pointerup', onPointerUp, { passive: true, capture: true })
+    window.addEventListener('pointercancel', onPointerUp, { passive: true, capture: true })
+    window.addEventListener('blur', onPointerUp)
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => {
       el.removeEventListener('wheel', onWheel)
       el.removeEventListener('pointerdown', onPointerDown)
-      window.removeEventListener('pointerup', onPointerUp)
-      window.removeEventListener('pointercancel', onPointerUp)
+      window.removeEventListener('pointerup', onPointerUp, { capture: true })
+      window.removeEventListener('pointercancel', onPointerUp, { capture: true })
+      window.removeEventListener('blur', onPointerUp)
       el.removeEventListener('scroll', onScroll)
     }
   }, [])
