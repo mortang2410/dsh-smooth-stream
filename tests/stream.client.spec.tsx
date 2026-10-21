@@ -990,6 +990,16 @@ describe('assistant renderer', () => {
     expect(view.container.querySelector('details')).toBeNull()
   })
 
+  it('pins the reasoning body with a scroll target WebKit honors', () => {
+    // `el.scrollTop = Number.MAX_SAFE_INTEGER` is ignored by WebKit: scrollTop
+    // stays 0 there while Chromium clamps it to the bottom, so the follow looked
+    // correct in every headless check and did nothing in Safari. The pin must use
+    // a finite target that both engines clamp.
+    const source = readFileSync(join(process.cwd(), 'src/client/TypewriterAssistantNodeView.tsx'), 'utf8')
+    expect(source).not.toMatch(/scrollTop\s*=\s*Number\.MAX_SAFE_INTEGER/)
+    expect(source).toMatch(/scrollTop\s*=\s*el\.scrollHeight/)
+  })
+
   it('renders the dictionary-supplied title for the Think disclosure', () => {
     const block = { kind: 'reasoning', text: 'first line\nlatest tokens' }
     const view = render(<TypewriterAssistantNodeView {...assistantProps('running', [block])} />)
