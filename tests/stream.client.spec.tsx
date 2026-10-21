@@ -990,11 +990,12 @@ describe('assistant renderer', () => {
     expect(view.container.querySelector('details')).toBeNull()
   })
 
-  it('pins the reasoning body with a scroll target WebKit honors', () => {
-    // `el.scrollTop = Number.MAX_SAFE_INTEGER` is ignored by WebKit: scrollTop
-    // stays 0 there while Chromium clamps it to the bottom, so the follow looked
-    // correct in every headless check and did nothing in Safari. The pin must use
-    // a finite target that both engines clamp.
+  it('pins the reasoning body with scrollHeight, never Number.MAX_SAFE_INTEGER', () => {
+    // Source contract, not rendered behaviour: jsdom lays nothing out, so the
+    // only face of this defect it can see is the assignment itself. WebKit
+    // ignores `scrollTop = Number.MAX_SAFE_INTEGER` and leaves scrollTop at 0,
+    // while Chromium clamps it, so the follow passed every headless check and
+    // never moved in Safari. Behavioural coverage lives in the live harness.
     const source = readFileSync(join(process.cwd(), 'src/client/TypewriterAssistantNodeView.tsx'), 'utf8')
     expect(source).not.toMatch(/scrollTop\s*=\s*Number\.MAX_SAFE_INTEGER/)
     expect(source).toMatch(/scrollTop\s*=\s*el\.scrollHeight/)

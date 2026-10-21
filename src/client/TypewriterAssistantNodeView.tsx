@@ -449,6 +449,20 @@ function latestLine(text: string): string {
 }
 
 /**
+ * Put the reasoning body on its newest line and record where that landed, so
+ * the scroll handler can tell the follow's own write from the reader moving up.
+ * `scrollHeight`, never `Number.MAX_SAFE_INTEGER`: WebKit ignores that value and
+ * leaves scrollTop at 0, so the follow silently did nothing in Safari while
+ * Chromium clamped it to the bottom.
+ */
+function pinToNewestLine(el: HTMLElement, pinnedTop: { current: number }): void {
+  if (el.scrollHeight - el.scrollTop - el.clientHeight > 2) {
+    el.scrollTop = el.scrollHeight
+    pinnedTop.current = el.scrollTop
+  }
+}
+
+/**
  * Built-in Think disclosure with a smoothed `text` feed. Chevron and row
  * click stay on the disclosure chrome, which the plugin's AnimatedDisclosure
  * renders with a height-animated body (the harness primitive would mount and
@@ -508,6 +522,11 @@ function AnimatedReasoning({
   const localFadeSpeedRef = useRef(35)
   const fadeSpeedRef = followSpeedCpsRef ?? localFadeSpeedRef
   const userScrolledRef = useRef(false)
+  // Where the follow last left this body. A scroll that lands above it is
+  // the reader moving up; the pin never writes anywhere else, so no pointer
+  // or wheel bookkeeping is needed to tell the two apart, and a touch pan
+  // (which cancels the pointer stream) still counts.
+  const pinnedTopRef = useRef(0)
   const commitAnchorRef = useRef<HTMLDivElement>(null)
   // The running鈫抐alse flip is the AUTO-close: it collapses instantly and the
   // follower's settle spring absorbs the height step. A later manual toggle
@@ -649,48 +668,26 @@ function AnimatedReasoning({
     notifyFollowCommit(commitAnchorRef.current)
   }, [running, thinkAutoExpand])
 
-  // The body belongs on its newest line whenever the card is open and the
-  // reader has not scrolled it. Pinning on open matters because the auto-close
-  // at the end of a stream leaves a finished card collapsed; reopening it by
-  // hand, or by another plugin such as dsh-think-expand, would otherwise land
-  // on the first line, which is what "the bubble is stuck at the top" looks
-  // like. `followedRef` remembers that this body was pinned, so the settle
-  // window below only touches a body that had a live position to keep.
-  const followedRef = useRef(false)
+  // While the card is open and the reader has not taken the position back, the
+  // body sits on its newest line: every reveal commit, and the reopen after the
+  // auto-close folded a finished card.
   useLayoutEffect(() => {
-    if (!expanded || userScrolledRef.current) return
     const el = thinkBodyRef.current
-    if (el === null) return
-    followedRef.current = true
-    // Same task as the commit that grew the body, before paint. Reading the
-    // geometry from a queued frame ran one reveal commit behind, so the newest
-    // line sat under the fold and the last commit of a stream was never
-    // followed at all: the body stopped one line short and stayed there.
-    if (el.scrollHeight - el.scrollTop - el.clientHeight > 2) {
-      // `scrollHeight`, not `Number.MAX_SAFE_INTEGER`: WebKit (Safari) ignores
-      // that value outright and leaves scrollTop at 0, so the follow silently
-      // did nothing in Safari while it clamped and worked in Chromium.
-      el.scrollTop = el.scrollHeight
-    }
+    if (el === null || !expanded || userScrolledRef.current) return
+    pinToNewestLine(el, pinnedTopRef)
   }, [running, expanded, shown])
 
   useEffect(() => {
-    // A settled turn re-renders its answer once more (streaming parse to the
-    // settled parse) and the conversation follower releases its transform. That
-    // reflow can change this body's wrapping a moment later, which leaves the
-    // newest line cut even though the body was pinned when the stream ended.
-    // Keep pinning for a short window after the tail ends, for a body that was
-    // pinned at least once (opening a card pins it too, see above).
+    // The settled re-render, the follower releasing its transform, and a
+    // reopened card's track glide all change this body after the commit, so the
+    // pin above cannot see them. Keep pinning through that window, never
+    // against a reader who has taken the position.
     if (running) return
     const el = thinkBodyRef.current
     if (el === null) return
-    const pin = (): void => {
-      if (!followedRef.current || !expanded || userScrolledRef.current) return
-      if (el.scrollHeight - el.scrollTop - el.clientHeight > 2) {
-        el.scrollTop = el.scrollHeight
-      }
-    }
-    const timers = [120, 500, 1200, 2500].map(delay => setTimeout(pin, delay))
+    const timers = [120, 500, 1200, 2500].map(delay => setTimeout(() => {
+      if (expanded && !userScrolledRef.current) pinToNewestLine(el, pinnedTopRef)
+    }, delay))
     return () => {
       for (const timer of timers) clearTimeout(timer)
     }
@@ -699,52 +696,20 @@ function AnimatedReasoning({
   useEffect(() => {
     const el = thinkBodyRef.current
     if (el === null) return
-    let isPointerDown = false
-    const onWheel = (e: WheelEvent) => {
-      if (e.deltaY < 0) {
-        // Reader intent is a wheel that actually moved this box up. A wheel over
-        // a body that cannot scroll up (still under the 300px cap, or already at
-        // its top) is scrolling the conversation instead, and latching a pause
-        // on it used to stop follow for the rest of the reasoning block: nothing
-        // scrolls the body back to the bottom, so nothing cleared the latch.
-        if (el.scrollTop > 0) userScrolledRef.current = true
-      } else if (e.deltaY > 0) {
-        if (el.scrollHeight - el.scrollTop - el.clientHeight <= 30) {
-          userScrolledRef.current = false
-        }
-      }
-    }
-    const onPointerDown = () => {
-      isPointerDown = true
-    }
-    const onPointerUp = () => {
-      isPointerDown = false
-    }
+    // One rule for every input device: a scroll that lands above where the
+    // follow left the body is the reader moving up, and coming back within
+    // 30px of the bottom hands the position back. A wheel or touch pan over a
+    // body that cannot move produces no scroll here at all, so it cannot pause
+    // the follow by accident.
     const onScroll = () => {
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 30
-      if (atBottom) {
+      if (el.scrollHeight - el.scrollTop - el.clientHeight <= 30) {
         userScrolledRef.current = false
-      } else if (isPointerDown) {
+      } else if (el.scrollTop < pinnedTopRef.current - 2) {
         userScrolledRef.current = true
       }
     }
-    el.addEventListener('wheel', onWheel, { passive: true })
-    el.addEventListener('pointerdown', onPointerDown, { passive: true })
-    // Capture on the window, plus blur: a release that lands on another window
-    // or never reaches this document would otherwise leave the press latched,
-    // and the next streamed scroll would look like a reader's drag.
-    window.addEventListener('pointerup', onPointerUp, { passive: true, capture: true })
-    window.addEventListener('pointercancel', onPointerUp, { passive: true, capture: true })
-    window.addEventListener('blur', onPointerUp)
     el.addEventListener('scroll', onScroll, { passive: true })
-    return () => {
-      el.removeEventListener('wheel', onWheel)
-      el.removeEventListener('pointerdown', onPointerDown)
-      window.removeEventListener('pointerup', onPointerUp, { capture: true })
-      window.removeEventListener('pointercancel', onPointerUp, { capture: true })
-      window.removeEventListener('blur', onPointerUp)
-      el.removeEventListener('scroll', onScroll)
-    }
+    return () => el.removeEventListener('scroll', onScroll)
   }, [])
 
   useEffect(() => {
