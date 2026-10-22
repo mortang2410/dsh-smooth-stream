@@ -1895,9 +1895,12 @@ export function watchNaturalFloor(port: HTMLElement): void {
     }, { passive: true })
   }
   const current = watcher
-  if (current.observer !== null) return
-  const content = port.firstElementChild
-  if (content === null) return
+  const boxes = portContentBoxes(port)
+  if (current.observer !== null) {
+    for (const box of boxes) current.observer.observe(box)
+    return
+  }
+  if (boxes.length === 0) return
   current.observer = new ResizeObserver(() => {
     // Stand down only while something is actually writing this port. A mounted
     // arm is not enough: during a thinking or tool-call phase every arm is
@@ -1919,15 +1922,40 @@ export function watchNaturalFloor(port: HTMLElement): void {
     setFollowScrollTop(port, floor)
     current.wroteAt = followWriteAt.get(port) ?? Number.NaN
   })
-  current.observer.observe(content)
+  for (const box of boxes) current.observer.observe(box)
 }
-
 /** Last scrollTop this engine itself wrote through setFollowScrollTop, per port. */
 const followWrittenTops = new WeakMap<HTMLElement, number>()
 /** Per port: scrollHeight at the previous growth delivery, and this keeper's last write time. */
 interface FloorState { sh: number, wroteAt: number }
 const floorStates = new WeakMap<HTMLElement, FloorState>()
 let floorObserver: ResizeObserver | null = null
+
+/**
+ * Elements under the port that have a box to resize.
+ *
+ * The live port wraps the transcript in a `display: contents` element: the
+ * wrapper itself is 0x0 and never resizes, while the list inside it carries the
+ * whole transcript height. A ResizeObserver on the wrapper never fires, which
+ * makes a floor keeper built on it inert. Descend through such wrappers and
+ * return the first elements that actually have a layout box.
+ *
+ * @param port - Conversation scrollport.
+ * @returns Element children that can report growth.
+ */
+function portContentBoxes(port: HTMLElement): HTMLElement[] {
+  const boxes: HTMLElement[] = []
+  const visit = (element: Element): void => {
+    if (!(element instanceof HTMLElement)) return
+    if (getComputedStyle(element).display === 'contents') {
+      for (const child of element.children) visit(child)
+      return
+    }
+    boxes.push(element)
+  }
+  for (const child of port.children) visit(child)
+  return boxes
+}
 
 /**
  * Hold the conversation floor through phases no reveal arm covers.
@@ -1940,9 +1968,9 @@ let floorObserver: ResizeObserver | null = null
  * host restore are the same case. It is the host's own re-follow rule
  * (`top >= floor` at its band), applied at the moment content grows.
  *
- * One ResizeObserver for the page, fed the port's direct children by each
- * mounted row. It runs after layout, so its geometry reads force nothing, and
- * it drops a child the moment the child leaves the document.
+ * One ResizeObserver for the page, fed the elements under the port that have a
+ * box, by each mounted row. It runs after layout, so its geometry reads force
+ * nothing, and it drops an element the moment it leaves the document.
  */
 export function keepConversationFloor(root: HTMLElement | null): void {
   if (root === null || typeof ResizeObserver === 'undefined') return
@@ -1951,7 +1979,7 @@ export function keepConversationFloor(root: HTMLElement | null): void {
   floorObserver ??= new ResizeObserver(onTranscriptResize)
   if (!floorStates.has(port)) floorStates.set(port, { sh: port.scrollHeight, wroteAt: Number.NaN })
   // observe() is idempotent for an element already observed.
-  for (const child of port.children) floorObserver.observe(child)
+  for (const box of portContentBoxes(port)) floorObserver.observe(box)
 }
 
 function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObserver): void {
@@ -1961,7 +1989,9 @@ function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObse
       observer.unobserve(entry.target)
       continue
     }
-    const port = entry.target.parentElement
+    // The observed element can sit under `display: contents` wrappers, so its
+    // parent is not necessarily the port.
+    const port = entry.target.closest<HTMLElement>('[data-conversation-scroll]')
     if (port !== null) ports.add(port)
   }
   for (const port of ports) keepOneFloor(port)
