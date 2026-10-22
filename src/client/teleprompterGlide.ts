@@ -89,12 +89,6 @@ const FOLLOW_SLACK_PX = 25
  */
 const FOLLOW_RESIDUE_PX = FOLLOW_SLACK_PX * 2
 /**
- * How long after the last growth the host's own smooth landing is given to
- * finish before the floor is re-checked. Shorter and the animation is still in
- * flight; longer and the host has already sampled the gap and dropped follow.
- */
-const FOLLOW_SETTLE_DELAY_MS = 320
-/**
  * Reader input this recent makes a scroll a reader's move, not layout. Same
  * intents the host itself treats as reader input: wheel, touch, pointer, keys.
  */
@@ -1941,7 +1935,6 @@ const followWrittenTops = new WeakMap<HTMLElement, number>()
 interface FloorState {
   sh: number
   wroteAt: number
-  settle: ReturnType<typeof setTimeout> | null
   intentAt: number
 }
 const floorStates = new WeakMap<HTMLElement, FloorState>()
@@ -1995,12 +1988,12 @@ export function keepConversationFloor(root: HTMLElement | null): void {
   floorObserver ??= new ResizeObserver(onTranscriptResize)
   let state = floorStates.get(port)
   if (state === undefined) {
-    state = { sh: port.scrollHeight, wroteAt: Number.NaN, settle: null, intentAt: Number.NEGATIVE_INFINITY }
+    state = { sh: port.scrollHeight, wroteAt: Number.NaN, intentAt: Number.NEGATIVE_INFINITY }
     floorStates.set(port, state)
     attachFloorSettle(port, state)
     // A port can already be a few pixels high when a row mounts, with no scroll
-    // or growth left to report it. One check at attach closes that.
-    scheduleFloorSettle(port, state)
+    // or growth left to report it. One check here closes that.
+    settleFloorIfResidue(port, state)
   }
   // observe() is idempotent for an element already observed.
   for (const box of portContentBoxes(port)) floorObserver.observe(box)
@@ -2012,8 +2005,10 @@ export function keepConversationFloor(root: HTMLElement | null): void {
  * The host's own smooth follow can land on the floor it computed before the
  * last growth, and the browser's scroll anchoring can move the port up while
  * content above it collapses, either one after the last growth delivery. Both
- * leave the port just outside the host's band, which drops its follow. Reader
- * input is recorded here so a scroll a reader made is never pulled back.
+ * leave the port just outside the host's band, which drops its follow. The
+ * browser's own `scrollend` is the event for "that motion has finished", so the
+ * check runs there and never on a clock. Reader input is recorded here so a
+ * scroll a reader made is never pulled back.
  *
  * @param port - Conversation scrollport.
  * @param state - That port's keeper state.
@@ -2023,7 +2018,27 @@ function attachFloorSettle(port: HTMLElement, state: FloorState): void {
   for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
     port.addEventListener(type, recordIntent, { passive: true, capture: true })
   }
-  port.addEventListener('scroll', () => scheduleFloorSettle(port, state), { passive: true })
+  port.addEventListener('scrollend', () => settleFloorIfResidue(port, state), { passive: true })
+}
+
+/**
+ * Close a gap that motion left just above the floor.
+ *
+ * Runs on `scrollend` and once at attach. Only a gap inside the residue band is
+ * closed, and only when no reader input was recorded in the intent window, so a
+ * reader's own scroll is left alone.
+ *
+ * @param port - Conversation scrollport.
+ * @param state - That port's keeper state.
+ */
+function settleFloorIfResidue(port: HTMLElement, state: FloorState): void {
+  const floor = port.scrollHeight - port.clientHeight
+  const gap = floor - port.scrollTop
+  if (gap <= FOLLOW_SETTLE_EPSILON_PX || gap > FOLLOW_RESIDUE_PX) return
+  if (performance.now() - state.intentAt < FOLLOW_INTENT_WINDOW_MS) return
+  followReaderHolds.delete(port)
+  setFollowScrollTop(port, floor)
+  state.wroteAt = followWriteAt.get(port) ?? Number.NaN
 }
 
 function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObserver): void {
@@ -2044,7 +2059,7 @@ function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObse
 function keepOneFloor(port: HTMLElement): void {
   const sh = port.scrollHeight
   const state = floorStates.get(port)
-    ?? { sh, wroteAt: Number.NaN, settle: null, intentAt: Number.NEGATIVE_INFINITY }
+    ?? { sh, wroteAt: Number.NaN, intentAt: Number.NEGATIVE_INFINITY }
   const before = state.sh
   state.sh = sh
   floorStates.set(port, state)
@@ -2069,35 +2084,6 @@ function keepOneFloor(port: HTMLElement): void {
     setFollowScrollTop(port, floor)
     state.wroteAt = followWriteAt.get(port) ?? Number.NaN
   }
-  // The host's own smooth follow can still land on the floor it computed before
-  // this growth, a few pixels high, after this delivery is handled and with no
-  // further growth to report it. Re-check once that animation has settled: a
-  // gap inside the residue band is ours to close, and closing it is what stops
-  // the host from sampling a gap and dropping follow.
-  if (gap <= FOLLOW_SLACK_PX) scheduleFloorSettle(port, state)
-}
-
-/**
- * Re-check the floor once motion on the port has settled.
- *
- * Only a gap inside the residue band is closed, and only when no reader input
- * was recorded in the intent window, so a reader's own scroll is left alone.
- *
- * @param port - Conversation scrollport.
- * @param state - That port's keeper state, holding the one pending timer.
- */
-function scheduleFloorSettle(port: HTMLElement, state: FloorState): void {
-  if (state.settle !== null) clearTimeout(state.settle)
-  state.settle = setTimeout(() => {
-    state.settle = null
-    const floor = port.scrollHeight - port.clientHeight
-    const gap = floor - port.scrollTop
-    if (gap <= FOLLOW_SETTLE_EPSILON_PX || gap > FOLLOW_RESIDUE_PX) return
-    if (performance.now() - state.intentAt < FOLLOW_INTENT_WINDOW_MS) return
-    followReaderHolds.delete(port)
-    setFollowScrollTop(port, floor)
-    state.wroteAt = followWriteAt.get(port) ?? Number.NaN
-  }, FOLLOW_SETTLE_DELAY_MS)
 }
 
 function settleAtFloor(port: HTMLElement): void {
