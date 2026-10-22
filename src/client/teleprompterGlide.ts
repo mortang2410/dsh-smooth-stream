@@ -1910,8 +1910,9 @@ export function watchNaturalFloor(port: HTMLElement): void {
     // Stand down only while something is actually writing this port. A mounted
     // arm is not enough: during a thinking or tool-call phase every arm is
     // parked, no leader entry is removed, and from then on nobody writes the
-    // port at all while the turn keeps growing it.
-    if (current.readerLeft) return
+    // port at all while the turn keeps growing it. The shared hold covers a
+    // reader who moved a few lines up, inside this watcher's own band.
+    if (current.readerLeft || followReaderHolds.has(port)) return
     const now = performance.now()
     // An arm that wrote this port within the stall window owns the floor. This
     // watcher's own write is excluded by identity: setFollowScrollTop sets
@@ -1931,11 +1932,13 @@ export function watchNaturalFloor(port: HTMLElement): void {
 }
 /** Last scrollTop this engine itself wrote through setFollowScrollTop, per port. */
 const followWrittenTops = new WeakMap<HTMLElement, number>()
-/** Per port: scrollHeight at the previous growth delivery, and this keeper's last write time. */
+/** Per port: last seen geometry, write identity, and whether a reader holds it. */
 interface FloorState {
   sh: number
   wroteAt: number
   intentAt: number
+  lastTop: number
+  reader: boolean
 }
 const floorStates = new WeakMap<HTMLElement, FloorState>()
 let floorObserver: ResizeObserver | null = null
@@ -1988,7 +1991,14 @@ export function keepConversationFloor(root: HTMLElement | null): void {
   floorObserver ??= new ResizeObserver(onTranscriptResize)
   let state = floorStates.get(port)
   if (state === undefined) {
-    state = { sh: port.scrollHeight, wroteAt: Number.NaN, intentAt: Number.NEGATIVE_INFINITY }
+    state = {
+      sh: port.scrollHeight,
+      wroteAt: Number.NaN,
+      intentAt: Number.NEGATIVE_INFINITY,
+      lastTop: port.scrollTop,
+      // A recorded hold means the reader left before this row mounted.
+      reader: followReaderHolds.has(port),
+    }
     floorStates.set(port, state)
     attachFloorSettle(port, state)
     // A port can already be a few pixels high when a row mounts, with no scroll
@@ -1998,6 +2008,11 @@ export function keepConversationFloor(root: HTMLElement | null): void {
   // observe() is idempotent for an element already observed.
   for (const box of portContentBoxes(port)) floorObserver.observe(box)
 }
+
+/**
+ * Keys the browser scrolls a focused scrollport with.
+ */
+const FLOOR_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '])
 
 /**
  * Watch one port for a rest position a few pixels above its floor.
@@ -2010,14 +2025,52 @@ export function keepConversationFloor(root: HTMLElement | null): void {
  * check runs there and never on a clock. Reader input is recorded here so a
  * scroll a reader made is never pulled back.
  *
+ * Only input that can move this transcript counts. The composer seat is a child
+ * of the port, so a bare keydown or pointerdown listener counted typing a prompt
+ * as reader intent, which stood the keeper down exactly while the user typed the
+ * next message.
+ *
  * @param port - Conversation scrollport.
  * @param state - That port's keeper state.
  */
 function attachFloorSettle(port: HTMLElement, state: FloorState): void {
-  const recordIntent = (): void => { state.intentAt = performance.now() }
-  for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
-    port.addEventListener(type, recordIntent, { passive: true, capture: true })
-  }
+  const markIntent = (): void => { state.intentAt = performance.now() }
+  port.addEventListener('wheel', (event) => {
+    if (event.deltaY < 0) markIntent()
+  }, { passive: true, capture: true })
+  port.addEventListener('touchstart', (event) => {
+    const target = event.target
+    if (target instanceof Element && target.closest('[data-composer-seat]') !== null) return
+    markIntent()
+  }, { passive: true, capture: true })
+  port.addEventListener('pointerdown', (event) => {
+    // A drag on this port's own scrollbar targets the port; a click in a row
+    // does not scroll it.
+    if (event.target === port) markIntent()
+  }, { passive: true, capture: true })
+  port.addEventListener('keydown', (event) => {
+    if (!FLOOR_SCROLL_KEYS.has(event.key)) return
+    const target = event.target
+    if (target instanceof HTMLElement
+      && (target.isContentEditable || target.closest('input, textarea, [role="textbox"], [contenteditable]') !== null)) return
+    markIntent()
+  }, { capture: true })
+  port.addEventListener('scroll', () => {
+    const top = port.scrollTop
+    const floor = port.scrollHeight - port.clientHeight
+    // A move up that reader input caused is a reader position, whatever its
+    // size: a wheel nudge of a few lines lands inside the residue band and must
+    // not be treated as our own layout. Record it so growth leaves it alone.
+    if (top < state.lastTop - 2 && performance.now() - state.intentAt < FOLLOW_INTENT_WINDOW_MS) {
+      state.reader = true
+      followReaderHolds.set(port, { atMs: performance.now() })
+    }
+    state.lastTop = top
+    if (Math.abs(top - floor) <= FOLLOW_SETTLE_EPSILON_PX) {
+      state.reader = false
+      followReaderHolds.delete(port)
+    }
+  }, { passive: true })
   port.addEventListener('scrollend', () => settleFloorIfResidue(port, state), { passive: true })
 }
 
@@ -2035,7 +2088,7 @@ function settleFloorIfResidue(port: HTMLElement, state: FloorState): void {
   const floor = port.scrollHeight - port.clientHeight
   const gap = floor - port.scrollTop
   if (gap <= FOLLOW_SETTLE_EPSILON_PX || gap > FOLLOW_RESIDUE_PX) return
-  if (performance.now() - state.intentAt < FOLLOW_INTENT_WINDOW_MS) return
+  if (state.reader || performance.now() - state.intentAt < FOLLOW_INTENT_WINDOW_MS) return
   followReaderHolds.delete(port)
   setFollowScrollTop(port, floor)
   state.wroteAt = followWriteAt.get(port) ?? Number.NaN
@@ -2059,7 +2112,7 @@ function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObse
 function keepOneFloor(port: HTMLElement): void {
   const sh = port.scrollHeight
   const state = floorStates.get(port)
-    ?? { sh, wroteAt: Number.NaN, intentAt: Number.NEGATIVE_INFINITY }
+    ?? { sh, wroteAt: Number.NaN, intentAt: Number.NEGATIVE_INFINITY, lastTop: port.scrollTop, reader: false }
   const before = state.sh
   state.sh = sh
   floorStates.set(port, state)
@@ -2068,7 +2121,11 @@ function keepOneFloor(port: HTMLElement): void {
   const st = port.scrollTop
   const gap = before - ch - st
   const ours = Math.abs(st - (followWrittenTops.get(port) ?? Number.NaN)) <= 1
-  if (!ours && gap > FOLLOW_RESIDUE_PX) {
+  if (gap <= FOLLOW_SETTLE_EPSILON_PX) state.reader = false
+  // A reader position is one this engine did not put there: either the port is
+  // far above the floor, or reader input moved it up by any amount. Only a port
+  // that is still where we left it, a little high, is our own layout residue.
+  if (state.reader || (!ours && gap > FOLLOW_RESIDUE_PX)) {
     // Publish the verdict for arms that start later (they read the hold).
     followReaderHolds.set(port, { atMs: performance.now() })
     return
