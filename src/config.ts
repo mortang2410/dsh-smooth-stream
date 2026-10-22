@@ -32,7 +32,10 @@ export interface StreamConfig {
    * Whether the follow engine writes the conversation scroll position.
    * Projection-based kernels (0.1.7 and later) default to native Harness
    * scrolling. Set this field to true in the profile or settings page to
-   * restore takeover. The older settings registry keeps its default-on toggle.
+   * restore takeover. On a registry kernel the durable toggle still defaults
+   * on and wins as soon as it loads; this composition value only seeds the
+   * window before that read, and stands as the fallback if the read never
+   * arrives.
    */
   readonly controlScroll: boolean
 }

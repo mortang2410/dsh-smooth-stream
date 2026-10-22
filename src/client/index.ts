@@ -229,11 +229,13 @@ function wrapAgentChatRows(
 
 /**
  * A live settings cell shared by the renderer lifecycle and React views. It
- * starts on the shared defaults and follows the plugin-owned controller once
- * the optional settings services arrive. The composition default for
- * `controlScroll` seeds the start: on dsh 0.2.x that value is false, so the
- * follow engine stays out of the conversation scrollport even before the
- * settings read resolves, and it keeps staying out if the read fails.
+ * starts on the shared defaults, except for `controlScroll`, which the
+ * composition default seeds, and follows the plugin-owned controller once the
+ * optional settings services arrive. That seed covers the cases that never
+ * reach a loaded settings read: a takeover installed before the card attaches,
+ * a read that fails, and a composition with no settings service at all.
+ * Without it all three fell back to `DEFAULT_STREAM_SETTINGS.controlScroll`
+ * (true), which left the conversation takeover armed.
  */
 class SettingsCell {
   private readonly listeners = new Set<() => void>()
@@ -289,10 +291,14 @@ class SettingsCell {
   }
 
   /**
-   * True only once an attached settings service has produced its loaded values.
-   * Until then — and when no settings service is composed at all — `value` is
-   * still the shared client default, so callers that must not let that default
-   * shadow the install-time config have to ask before trusting it.
+   * True only once an attached settings service has produced its base settings
+   * view; the debug view loads after it and may never load on older hosts.
+   * Before the first successful load, every field of `value` except
+   * `controlScroll` is still the shared client default, and `controlScroll`
+   * holds the composition seed described above. A cell that has loaded once and
+   * then lost its card, or is waiting on a re-attached one, keeps those loaded
+   * values instead, so callers that must not let a stale or default value
+   * shadow the install-time config ask before trusting them.
    */
   ready(): boolean {
     return this.card?.getSnapshot().status === 'ready'

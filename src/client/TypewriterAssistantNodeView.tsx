@@ -671,7 +671,9 @@ function AnimatedReasoning({
 
   // While the card is open and the reader has not taken the position back, the
   // body sits on its newest line: every reveal commit, and the reopen after the
-  // auto-close folded a finished card.
+  // auto-close folded a finished card. This deliberately drops the base rule
+  // that a settled block opens at its top, where upstream keeps its first lines
+  // reachable; here the newest line is what the reader came back for.
   useLayoutEffect(() => {
     const el = thinkBodyRef.current
     if (el === null || !expanded || userScrolledRef.current) return
@@ -682,7 +684,8 @@ function AnimatedReasoning({
     // The settled re-render, the follower releasing its transform, and a
     // reopened card's track glide all change this body after the commit, so the
     // pin above cannot see them. Keep pinning through that window, never
-    // against a reader who has taken the position.
+    // against a reader who has taken the position. This is the second half of
+    // the settled-card reversal noted above.
     if (running || !expanded) return
     const el = thinkBodyRef.current
     if (el === null) return
