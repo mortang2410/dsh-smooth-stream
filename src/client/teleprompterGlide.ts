@@ -1810,8 +1810,8 @@ function holdNaturalFloor(port: HTMLElement): void {
 
 /** Ports watched for post-turn growth; one entry per scrollport. */
 interface FloorWatcher {
-  expected: number
   readerLeft: boolean
+  lastScrollAt: number
   observer: ResizeObserver | null
   port: HTMLElement
 }
@@ -1834,7 +1834,7 @@ export function watchNaturalFloor(port: HTMLElement): void {
   let watcher = floorWatchers.get(port)
   if (watcher === undefined) {
     watcher = {
-      expected: port.scrollTop,
+      lastScrollAt: performance.now(),
       // A recorded reader hold is the only trustworthy "the reader left" signal
       // at attach time; a bare gap is not, because a gap is the defect itself.
       readerLeft: followReaderHolds.has(port),
@@ -1845,17 +1845,28 @@ export function watchNaturalFloor(port: HTMLElement): void {
     port.addEventListener('scroll', () => {
       const current = floorWatchers.get(port)
       if (current === undefined) return
+      const now = performance.now()
+      const previous = current.lastScrollAt
+      current.lastScrollAt = now
       const floor = Math.max(0, port.scrollHeight - port.clientHeight)
-      if (port.scrollTop >= floor - 1) {
+      // Within the host's own band of the floor counts as "at the bottom" for
+      // the host, so it must count here too: landing a few pixels short must
+      // not latch the reader-left flag for the rest of the turn.
+      if (floor - port.scrollTop <= FOLLOW_SLACK_PX) {
         current.readerLeft = false
-        current.expected = port.scrollTop
         return
       }
-      if (port.scrollTop < current.expected - 2) current.readerLeft = true
+      // A scroll that happens while this watcher is the one writing is not a
+      // reader gesture; only an outward move with nobody writing counts.
+      const writtenAt = followWriteAt.get(port)
+      if (writtenAt !== undefined && now - writtenAt < FOLLOW_FLOOR_STALL_MS) return
+      if (now - previous < 200) return
+      if (port.scrollTop < (followScrollLedgers.get(port) ?? port.scrollTop) - 2) {
+        current.readerLeft = true
+      }
     }, { passive: true })
   }
   const current = watcher
-  current.expected = port.scrollTop
   if (current.observer !== null) return
   const content = port.firstElementChild
   if (content === null) return
@@ -1865,15 +1876,87 @@ export function watchNaturalFloor(port: HTMLElement): void {
     // parked, no leader entry is removed, and from then on nobody writes the
     // port at all while the turn keeps growing it.
     if (current.readerLeft) return
+    const now = performance.now()
     const writtenAt = followWriteAt.get(port)
-    if (writtenAt !== undefined && performance.now() - writtenAt < FOLLOW_FLOOR_STALL_MS) return
-    if (Math.abs(port.scrollTop - current.expected) > 2) return
+    if (writtenAt !== undefined && now - writtenAt < FOLLOW_FLOOR_STALL_MS) return
+    // Something is moving the port right now (a reader gesture, a host glide):
+    // never write on top of it.
+    if (now - current.lastScrollAt < FOLLOW_FLOOR_STALL_MS) return
     const floor = Math.max(0, port.scrollHeight - port.clientHeight)
     if (floor - port.scrollTop <= FOLLOW_SETTLE_EPSILON_PX) return
     setFollowScrollTop(port, floor)
-    current.expected = port.scrollTop
   })
   current.observer.observe(content)
+}
+
+/** Tick interval for the conversation floor keeper. */
+const FOLLOW_FLOOR_KEEPER_MS = 200
+
+interface FloorKeeperState {
+  lastSh: number
+  lastSt: number
+}
+const floorKeeperStates = new WeakMap<HTMLElement, FloorKeeperState>()
+let floorKeeperTimer: number | null = null
+
+/**
+ * Hold the conversation floor through phases no reveal arm covers.
+ *
+ * Every arm in this plugin is a row arm: it runs while that row reveals text
+ * or grows, and parks otherwise. A thinking or tool-call phase has no such row,
+ * so nothing writes the scrollport while the turn keeps adding height, the host
+ * samples a gap past its band, drops its own tail follow, and its jump-to-bottom
+ * button stays on until the next reply starts streaming.
+ *
+ * This keeper is independent of arms. It reads geometry twice per tick and acts
+ * only on the defect's own signature: the content grew and the scroll position
+ * did not move. That cannot fire while anything else is following correctly,
+ * because a following port moves when its content grows.
+ */
+export function keepConversationFloor(): void {
+  if (floorKeeperTimer !== null) return
+  if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return
+  const tick = (): void => {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+    if (typeof document === 'undefined') return
+    const ports = document.querySelectorAll<HTMLElement>('[data-conversation-scroll]')
+    for (const port of ports) keepOneFloor(port)
+  }
+  floorKeeperTimer = window.setInterval(tick, FOLLOW_FLOOR_KEEPER_MS) as unknown as number
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', () => {
+      if (floorKeeperTimer === null) return
+      clearInterval(floorKeeperTimer)
+      floorKeeperTimer = null
+    })
+  }
+}
+
+function keepOneFloor(port: HTMLElement): void {
+  const sh = port.scrollHeight
+  const st = port.scrollTop
+  const previous = floorKeeperStates.get(port)
+  floorKeeperStates.set(port, { lastSh: sh, lastSt: st })
+  if (port.clientHeight <= 0) return
+  const floor = Math.max(0, sh - port.clientHeight)
+  const gap = floor - st
+  // A reader who moved the port up without this engine writing it is reading;
+  // leave them alone until they come back to the floor themselves.
+  const ledger = followScrollLedgers.get(port)
+  if (ledger !== undefined && st < ledger - 2) {
+    followReaderHolds.set(port, { atMs: performance.now() })
+    return
+  }
+  if (followReaderHolds.has(port)) {
+    if (gap <= FOLLOW_SLACK_PX) followReaderHolds.delete(port)
+    return
+  }
+  if (gap <= FOLLOW_SETTLE_EPSILON_PX) return
+  if (previous === undefined) return
+  // The defect signature: height added, position untouched. A following port
+  // moves when its content grows, so this cannot fire under a healthy follow.
+  if (sh <= previous.lastSh || st !== previous.lastSt) return
+  setFollowScrollTop(port, floor)
 }
 
 function settleAtFloor(port: HTMLElement): void {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import { useConversationFollow, watchNaturalFloor } from './teleprompterGlide.ts'
+import { keepConversationFloor, useConversationFollow, watchNaturalFloor } from './teleprompterGlide.ts'
 import css from './TypewriterAssistantNodeView.module.css'
 
 /**
@@ -59,6 +59,12 @@ export function FollowHost({
     controlScroll,
   )
   const watching = active || entrance
+  useEffect(() => {
+    // Start the arm-independent floor keeper on the first row of the page. It
+    // holds the floor through thinking and tool-call phases, which no row arm
+    // covers because every arm parks when its own row stops revealing.
+    keepConversationFloor()
+  }, [])
   useEffect(() => {
     // A live row arms the floor watcher for the whole turn. A thinking or
     // tool-call phase grows the transcript while every arm is parked, and the
