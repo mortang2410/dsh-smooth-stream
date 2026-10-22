@@ -70,7 +70,10 @@ export const FOLLOW_MAX_FRAME_MS = 32
 export const FOLLOW_SPEED_REF_CPS = 35
 
 /** Reader-return / still-pinned boundary, matching ChatView + the demo. */
-export const FOLLOW_SLACK_PX = 25
+export /** A port nobody has written for this long is stalled: content grows under a
+ *  scrollport that is not moving, which is exactly what drops host follow. */
+const FOLLOW_FLOOR_STALL_MS = 400
+const FOLLOW_SLACK_PX = 25
 
 /**
  * Fallback upward scroll distance that releases the pin when the browser does
@@ -1362,8 +1365,12 @@ function safeShiftLimit(
   return limit
 }
 
+/** Time of the last write this engine made to a port, per port. */
+const followWriteAt = new WeakMap<HTMLElement, number>()
+
 function setFollowScrollTop(port: HTMLElement, nextTop: number): void {
   const ledger = followScrollLedgers.get(port)
+  followWriteAt.set(port, performance.now())
   // Claim before the write so a Host ResizeObserver that runs in the same task
   // sees the owner instead of racing in with its own bottom-follow.
   if (port.getAttribute(FOLLOW_OWNED_ATTR) === null) {
@@ -1822,7 +1829,7 @@ const floorWatchers = new WeakMap<HTMLElement, FloorWatcher>()
  *
  * @param port - Conversation scrollport whose floor should be held.
  */
-function watchNaturalFloor(port: HTMLElement): void {
+export function watchNaturalFloor(port: HTMLElement): void {
   if (typeof ResizeObserver === 'undefined') return
   let watcher = floorWatchers.get(port)
   if (watcher === undefined) {
@@ -1853,7 +1860,13 @@ function watchNaturalFloor(port: HTMLElement): void {
   const content = port.firstElementChild
   if (content === null) return
   current.observer = new ResizeObserver(() => {
-    if (current.readerLeft || followActivePorts.has(port)) return
+    // Stand down only while something is actually writing this port. A mounted
+    // arm is not enough: during a thinking or tool-call phase every arm is
+    // parked, no leader entry is removed, and from then on nobody writes the
+    // port at all while the turn keeps growing it.
+    if (current.readerLeft) return
+    const writtenAt = followWriteAt.get(port)
+    if (writtenAt !== undefined && performance.now() - writtenAt < FOLLOW_FLOOR_STALL_MS) return
     if (Math.abs(port.scrollTop - current.expected) > 2) return
     const floor = Math.max(0, port.scrollHeight - port.clientHeight)
     if (floor - port.scrollTop <= FOLLOW_SETTLE_EPSILON_PX) return
@@ -2553,6 +2566,13 @@ export function useConversationFollow(
           followTerminalBudgets.delete(nextPort)
           followCompletionGrowthCredit.delete(nextPort)
           followHadStatus.delete(nextPort)
+          // Arm the floor watcher for the whole turn, not only after this
+          // reveal parks. A thinking or tool-call phase grows the transcript
+          // with no arm driving the port, and the host drops its own follow on
+          // the first gap it samples beyond its band: from then on every block
+          // lands below the viewport and the jump-to-bottom button stays up
+          // until the next reveal starts.
+          watchNaturalFloor(nextPort)
         }
         const inherited = nextPort.hasAttribute(FOLLOW_OWNED_ATTR)
           ? followMotionStates.get(nextPort)

@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import { useConversationFollow } from './teleprompterGlide.ts'
+import { useConversationFollow, watchNaturalFloor } from './teleprompterGlide.ts'
 import css from './TypewriterAssistantNodeView.module.css'
 
 /**
@@ -58,6 +58,17 @@ export function FollowHost({
     revealedCharsRef,
     controlScroll,
   )
+  const watching = active || entrance
+  useEffect(() => {
+    // A live row arms the floor watcher for the whole turn. A thinking or
+    // tool-call phase grows the transcript while every arm is parked, and the
+    // host drops its own follow on the first gap it samples past its band.
+    if (!watching) return
+    const root = rootRef.current
+    if (root === null) return
+    const port = root.closest<HTMLElement>('[data-conversation-scroll]')
+    if (port !== null) watchNaturalFloor(port)
+  }, [rootRef, watching])
   useEffect(() => {
     if (onGrowth === undefined || typeof ResizeObserver === 'undefined') return
     const root = rootRef.current
