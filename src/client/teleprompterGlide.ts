@@ -1454,7 +1454,9 @@ function applyVisual(
     const floor = Math.max(0, contentHeight - port.clientHeight)
     if (port.style.overflowAnchor !== 'none') port.style.overflowAnchor = 'none'
     if (port.style.scrollBehavior !== 'auto') port.style.scrollBehavior = 'auto'
-    if (writeScrollTop) setFollowScrollTop(port, floor)
+    // Confirmed landing, not a single write: the same pass that retires owned
+    // space can still report the old extent in WebKit.
+    if (writeScrollTop) settleAtFloor(port)
     followRunwayOffsetHistory.set(port, 0)
     followObservedContentHeight.set(port, contentHeight)
     followLastFloorPx.set(port, floor)
@@ -1756,9 +1758,30 @@ function finishAtNaturalFloor(
 }
 
 function settleAtFloor(port: HTMLElement): void {
-  const floor = Math.max(0, port.scrollHeight - port.clientHeight)
-  setFollowScrollTop(port, floor)
   followReaderHolds.delete(port)
+  let attempts = 0
+  let expected: number | null = null
+  /**
+   * Land on the natural floor and confirm the landing. WebKit can still report
+   * the pre-retirement `scrollHeight` for the layout pass that removes owned
+   * space, so the first write lands exactly one runway above the real floor and
+   * the host then exposes its jump-to-bottom control with nothing left to
+   * correct it. Re-measure on the next frames while the port is still short,
+   * and stop the moment anything else moves the port (a reader, the host).
+   */
+  const land = (): void => {
+    if (expected !== null && Math.abs(port.scrollTop - expected) > 0.5) return
+    const floor = Math.max(0, port.scrollHeight - port.clientHeight)
+    setFollowScrollTop(port, floor)
+    expected = port.scrollTop
+    attempts += 1
+    if (attempts >= 3 || typeof requestAnimationFrame !== 'function') return
+    requestAnimationFrame(() => {
+      const gap = Math.max(0, port.scrollHeight - port.clientHeight) - port.scrollTop
+      if (gap > FOLLOW_SETTLE_EPSILON_PX) land()
+    })
+  }
+  land()
 }
 
 interface FollowLeader {
