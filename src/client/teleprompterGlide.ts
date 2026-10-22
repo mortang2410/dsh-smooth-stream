@@ -2179,9 +2179,12 @@ function keepOneFloor(port: HTMLElement): void {
   }
   if (gapNow <= FOLLOW_SETTLE_EPSILON_PX) {
     state.atFloor = true
-    // A delivery that finds the port on its floor is the following regime, not
-    // a jump: the keeper may close the next small gap.
-    state.trusted = true
+    // A delivery that finds the port on its floor keeps trust the keeper
+    // already had, but does not create it. The same delivery that spots a
+    // replaced transcript can find the host's restore already on the floor,
+    // and that position is the host's, not this engine's.
+    state.trusted = state.trusted || ours
+      || performance.now() - state.intentAt < FOLLOW_INTENT_WINDOW_MS
     state.reader = false
     followReaderHolds.delete(port)
   }
