@@ -74,6 +74,20 @@ export /** A port nobody has written for this long is stalled: content grows und
  *  scrollport that is not moving, which is exactly what drops host follow. */
 const FOLLOW_FLOOR_STALL_MS = 400
 const FOLLOW_SLACK_PX = 25
+/**
+ * How far above the floor the port may sit and still count as residue from our
+ * own layout rather than a reader position.
+ *
+ * The host computes a smooth-scroll target from the floor at that moment, the
+ * transcript grows while the animation runs, and the animation lands on the
+ * stale floor. Measured in a live session: the port came to rest 27px above the
+ * real floor, the host dropped its own follow on that gap, and the floor keeper
+ * read the same 27px as a reader and skipped every later growth, so the port
+ * stayed 380px behind while the button stayed up. A gap under two bands is one
+ * the port cannot have been scrolled to by a reader who wants the newest line,
+ * so the keeper lands it instead of publishing a reader hold.
+ */
+const FOLLOW_RESIDUE_PX = FOLLOW_SLACK_PX * 2
 
 /**
  * Fallback upward scroll distance that releases the pin when the browser does
@@ -1853,10 +1867,12 @@ export function watchNaturalFloor(port: HTMLElement): void {
       const floor = Math.max(0, port.scrollHeight - port.clientHeight)
       // Within the host's own band of the floor counts as "at the bottom" for
       // the host, so it must count here too: landing a few pixels short must
-      // not latch the reader-left flag for the rest of the turn. It must not arm
-      // the stall guard either: the observer below would then stand down for
-      // FOLLOW_FLOOR_STALL_MS over a port that is already where it wants it.
-      if (floor - port.scrollTop <= FOLLOW_SLACK_PX) {
+      // not latch the reader-left flag for the rest of the turn. The wider
+      // residue band covers a landing on a floor the host computed before the
+      // last growth. It must not arm the stall guard either: the observer below
+      // would then stand down for FOLLOW_FLOOR_STALL_MS over a port that is
+      // already where it wants it.
+      if (floor - port.scrollTop <= FOLLOW_RESIDUE_PX) {
         current.readerLeft = false
         return
       }
@@ -1961,7 +1977,7 @@ function keepOneFloor(port: HTMLElement): void {
   if (sh <= before || ch <= 0) return
   const st = port.scrollTop
   const ours = Math.abs(st - (followWrittenTops.get(port) ?? Number.NaN)) <= 1
-  if (!ours && before - ch - st > FOLLOW_SLACK_PX) {
+  if (!ours && before - ch - st > FOLLOW_RESIDUE_PX) {
     // Publish the verdict for arms that start later (they read the hold).
     followReaderHolds.set(port, { atMs: performance.now() })
     return
