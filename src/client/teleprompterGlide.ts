@@ -1944,6 +1944,35 @@ export function useConversationFollow(
     const startedAsEntrance = entrance
     const owner = {}
     const generation = ++followGeneration
+    /**
+     * Re-follow handshake. The host clears its tail-follow flag whenever it
+     * samples a gap wider than its band as reader movement, and it re-follows
+     * only on a scroll event that lands at the floor. An arm that starts with
+     * the port already at the floor therefore leaves that flag off while the
+     * position is already correct, so the host's jump-to-bottom button stays
+     * on until something else scrolls. Nudge one pixel up and restore on the
+     * next frame: the host then samples movement that ends at the floor and
+     * re-follows, and the one-pixel excursion stays below every threshold here.
+     */
+    const nudgeFollowHandshake = (): void => {
+      const root = rootRef.current
+      const port = root?.closest<HTMLElement>('[data-conversation-scroll]') ?? null
+      if (port === null || port.clientHeight <= 0) return
+      const floor = Math.max(0, port.scrollHeight - port.clientHeight)
+      if (floor - port.scrollTop > 1) return
+      const nudged = Math.max(0, floor - 1)
+      if (nudged === port.scrollTop) return
+      port.scrollTop = nudged
+      requestAnimationFrame(() => {
+        const current = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]') ?? null
+        if (current !== port) return
+        // Something else owns the port now (the engine, the host snap, a
+        // reader gesture): leave its position alone.
+        if (Math.abs(port.scrollTop - nudged) > 2) return
+        port.scrollTop = Math.max(0, port.scrollHeight - port.clientHeight)
+      })
+    }
+    nudgeFollowHandshake()
     let last = performance.now()
     let following = true
     let primed = false
