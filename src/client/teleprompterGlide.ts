@@ -1941,6 +1941,13 @@ interface FloorState {
   reader: boolean
   /** Whether the port was at its floor the last time this keeper looked. */
   atFloor: boolean
+  /**
+   * Whether that floor sighting is one this engine may close a residue
+   * against: its own write, or a position the reader steered to. A host
+   * restore or a programmatic jump to the floor raises `atFloor` without it,
+   * so the gap that follows belongs to the reader, not to layout residue.
+   */
+  trusted: boolean
 }
 const floorStates = new WeakMap<HTMLElement, FloorState>()
 let floorObserver: ResizeObserver | null = null
@@ -1993,6 +2000,10 @@ export function keepConversationFloor(root: HTMLElement | null): void {
   floorObserver ??= new ResizeObserver(onTranscriptResize)
   let state = floorStates.get(port)
   if (state === undefined) {
+    // A port that mounts above its floor is showing a position the host
+    // restored, not a residue this keeper may close.
+    const mountedAtFloor = port.scrollHeight - port.clientHeight - port.scrollTop
+      <= FOLLOW_SETTLE_EPSILON_PX
     state = {
       sh: port.scrollHeight,
       wroteAt: Number.NaN,
@@ -2000,9 +2011,8 @@ export function keepConversationFloor(root: HTMLElement | null): void {
       lastTop: port.scrollTop,
       // A recorded hold means the reader left before this row mounted.
       reader: followReaderHolds.has(port),
-      // A port that mounts above its floor is showing a position the host
-      // restored, not a residue this keeper may close.
-      atFloor: port.scrollHeight - port.clientHeight - port.scrollTop <= FOLLOW_SETTLE_EPSILON_PX,
+      atFloor: mountedAtFloor,
+      trusted: mountedAtFloor,
     }
     floorStates.set(port, state)
     attachFloorSettle(port, state)
@@ -2065,7 +2075,10 @@ function attachFloorSettle(port: HTMLElement, state: FloorState): void {
     // One jump larger than the residue band that this engine did not write is a
     // host restore or a rail jump: the port is at the reader's position, so a
     // later gap above the floor is not this keeper's residue to close.
-    if (!own && Math.abs(top - state.lastTop) > FOLLOW_RESIDUE_PX) state.atFloor = false
+    if (!own && Math.abs(top - state.lastTop) > FOLLOW_RESIDUE_PX) {
+      state.atFloor = false
+      state.trusted = false
+    }
     // A move up that reader input caused is a reader position, whatever its
     // size: a wheel nudge of a few lines lands inside the residue band and must
     // not be treated as our own layout. Record it so growth leaves it alone.
@@ -2076,6 +2089,13 @@ function attachFloorSettle(port: HTMLElement, state: FloorState): void {
     state.lastTop = top
     if (Math.abs(top - floor) <= FOLLOW_SETTLE_EPSILON_PX) {
       state.atFloor = true
+      // Arriving at the floor keeps the keeper following, but only a floor this
+      // engine wrote or the reader steered to may later be settled: after a
+      // restore or a programmatic jump, a small gap is the reader's position.
+      // Trust is gained, never lost here: a host that rewrites the floor this
+      // engine already reached does not make the next landing the reader's.
+      state.trusted = state.trusted || own
+        || performance.now() - state.intentAt < FOLLOW_INTENT_WINDOW_MS
       state.reader = false
       followReaderHolds.delete(port)
     }
@@ -2088,8 +2108,9 @@ function attachFloorSettle(port: HTMLElement, state: FloorState): void {
  *
  * Runs on `scrollend`. Only a gap inside the residue band is closed, only when
  * a reader is not holding the port, and only when the keeper last saw the port
- * on its floor: a port that arrived high, by host restore or by a different
- * conversation rendered into the same element, is not a residue.
+ * on its floor under its own control: a port that arrived high, by host restore
+ * or by a different conversation rendered into the same element, is not a
+ * residue, and neither is a gap that follows a floor the host jumped to.
  *
  * @param port - Conversation scrollport.
  * @param state - That port's keeper state.
@@ -2103,11 +2124,12 @@ function settleFloorIfResidue(port: HTMLElement, state: FloorState): void {
   const floor = sh - port.clientHeight
   const gap = floor - port.scrollTop
   if (gap <= FOLLOW_SETTLE_EPSILON_PX || gap > FOLLOW_RESIDUE_PX) return
-  if (state.reader || !state.atFloor) return
+  if (state.reader || !state.atFloor || !state.trusted) return
   followReaderHolds.delete(port)
   setFollowScrollTop(port, floor)
   state.wroteAt = followWriteAt.get(port) ?? Number.NaN
   state.atFloor = true
+  state.trusted = true
 }
 
 function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObserver): void {
@@ -2135,6 +2157,7 @@ function keepOneFloor(port: HTMLElement): void {
       lastTop: port.scrollTop,
       reader: false,
       atFloor: false,
+      trusted: false,
     }
   const before = state.sh
   state.sh = sh
@@ -2150,9 +2173,15 @@ function keepOneFloor(port: HTMLElement): void {
   // cannot say so: a real growth can be taller than the viewport, and a replaced
   // conversation can be shorter. What separates them is that the port did not
   // sit still where this engine left it.
-  if (!ours && Math.abs(sh - before) > ch) state.atFloor = false
+  if (!ours && Math.abs(sh - before) > ch) {
+    state.atFloor = false
+    state.trusted = false
+  }
   if (gapNow <= FOLLOW_SETTLE_EPSILON_PX) {
     state.atFloor = true
+    // A delivery that finds the port on its floor is the following regime, not
+    // a jump: the keeper may close the next small gap.
+    state.trusted = true
     state.reader = false
     followReaderHolds.delete(port)
   }
@@ -2177,6 +2206,7 @@ function keepOneFloor(port: HTMLElement): void {
     setFollowScrollTop(port, floor)
     state.wroteAt = followWriteAt.get(port) ?? Number.NaN
     state.atFloor = true
+    state.trusted = true
   }
 }
 
