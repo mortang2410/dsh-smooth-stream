@@ -2061,6 +2061,11 @@ function attachFloorSettle(port: HTMLElement, state: FloorState): void {
   port.addEventListener('scroll', () => {
     const top = port.scrollTop
     const floor = port.scrollHeight - port.clientHeight
+    const own = Math.abs(top - (followWrittenTops.get(port) ?? Number.NaN)) <= 1
+    // One jump larger than the residue band that this engine did not write is a
+    // host restore or a rail jump: the port is at the reader's position, so a
+    // later gap above the floor is not this keeper's residue to close.
+    if (!own && Math.abs(top - state.lastTop) > FOLLOW_RESIDUE_PX) state.atFloor = false
     // A move up that reader input caused is a reader position, whatever its
     // size: a wheel nudge of a few lines lands inside the residue band and must
     // not be treated as our own layout. Record it so growth leaves it alone.
@@ -2070,6 +2075,7 @@ function attachFloorSettle(port: HTMLElement, state: FloorState): void {
     }
     state.lastTop = top
     if (Math.abs(top - floor) <= FOLLOW_SETTLE_EPSILON_PX) {
+      state.atFloor = true
       state.reader = false
       followReaderHolds.delete(port)
     }
@@ -2101,6 +2107,7 @@ function settleFloorIfResidue(port: HTMLElement, state: FloorState): void {
   followReaderHolds.delete(port)
   setFollowScrollTop(port, floor)
   state.wroteAt = followWriteAt.get(port) ?? Number.NaN
+  state.atFloor = true
 }
 
 function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObserver): void {
@@ -2137,10 +2144,13 @@ function keepOneFloor(port: HTMLElement): void {
   const st = port.scrollTop
   const floor = sh - ch
   const gapNow = floor - st
-  // A scrollHeight that changes by a whole viewport in one delivery is a
-  // different conversation rendered into the same port, not growth: the
-  // position it lands on is the host's restore, which is a reader position.
-  if (Math.abs(sh - before) > ch) state.atFloor = false
+  const ours = Math.abs(st - (followWrittenTops.get(port) ?? Number.NaN)) <= 1
+  // A different conversation rendered into the same port lands wherever the
+  // host restored it, and that position is not ours to correct. Size alone
+  // cannot say so: a real growth can be taller than the viewport, and a replaced
+  // conversation can be shorter. What separates them is that the port did not
+  // sit still where this engine left it.
+  if (!ours && Math.abs(sh - before) > ch) state.atFloor = false
   if (gapNow <= FOLLOW_SETTLE_EPSILON_PX) {
     state.atFloor = true
     state.reader = false
@@ -2148,7 +2158,6 @@ function keepOneFloor(port: HTMLElement): void {
   }
   if (sh <= before) return
   const gap = before - ch - st
-  const ours = Math.abs(st - (followWrittenTops.get(port) ?? Number.NaN)) <= 1
   // A reader position is one this engine did not put there: reader input moved
   // it up, or it has been off the floor since before this growth. Only a port
   // the keeper last saw on its floor, a little high, is our own layout residue.
