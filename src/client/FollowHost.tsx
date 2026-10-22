@@ -63,8 +63,8 @@ export function FollowHost({
     // Start the arm-independent floor keeper on the first row of the page. It
     // holds the floor through thinking and tool-call phases, which no row arm
     // covers because every arm parks when its own row stops revealing.
-    keepConversationFloor()
-  }, [])
+    keepConversationFloor(rootRef.current)
+  }, [rootRef])
   useEffect(() => {
     // A live row arms the floor watcher for the whole turn. A thinking or
     // tool-call phase grows the transcript while every arm is parked, and the

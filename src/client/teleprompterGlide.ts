@@ -1384,6 +1384,7 @@ function setFollowScrollTop(port: HTMLElement, nextTop: number): void {
   }
   if (Math.abs(port.scrollTop - nextTop) > 0.01) port.scrollTop = nextTop
   followScrollLedgers.set(port, port.scrollTop)
+  followWrittenTops.set(port, port.scrollTop)
   const ownedTop = String(port.scrollTop)
   if (port.getAttribute(FOLLOW_OWNED_ATTR) !== ownedTop) {
     port.setAttribute(FOLLOW_OWNED_ATTR, ownedTop)
@@ -1889,78 +1890,76 @@ export function watchNaturalFloor(port: HTMLElement): void {
   current.observer.observe(content)
 }
 
-/** Tick interval for the conversation floor keeper. */
-const FOLLOW_FLOOR_KEEPER_MS = 200
-
-interface FloorKeeperState {
-  lastSh: number
-  lastSt: number
-}
-const floorKeeperStates = new WeakMap<HTMLElement, FloorKeeperState>()
-let floorKeeperTimer: number | null = null
+/** Last scrollTop this engine itself wrote through setFollowScrollTop, per port. */
+const followWrittenTops = new WeakMap<HTMLElement, number>()
+/** Per port: scrollHeight at the previous growth delivery, and this keeper's last write time. */
+interface FloorState { sh: number, wroteAt: number }
+const floorStates = new WeakMap<HTMLElement, FloorState>()
+let floorObserver: ResizeObserver | null = null
 
 /**
  * Hold the conversation floor through phases no reveal arm covers.
  *
- * Every arm in this plugin is a row arm: it runs while that row reveals text
- * or grows, and parks otherwise. A thinking or tool-call phase has no such row,
- * so nothing writes the scrollport while the turn keeps adding height, the host
- * samples a gap past its band, drops its own tail follow, and its jump-to-bottom
- * button stays on until the next reply starts streaming.
+ * Rule: when the transcript grows, the port moves to the new floor unless the
+ * reader has it, and the reader has it when the port sits more than the host's
+ * 25px band above the floor as it stood before this growth and this engine did
+ * not put it there. The rule reads only where the port is, never how it got
+ * there, so wheel, PageUp, arrows, a rail jump, touch, a scrollbar drag and a
+ * host restore are the same case. It is the host's own re-follow rule
+ * (`top >= floor` at its band), applied at the moment content grows.
  *
- * This keeper is independent of arms. It reads geometry twice per tick and acts
- * only on the defect's own signature: the content grew and the scroll position
- * did not move. That cannot fire while anything else is following correctly,
- * because a following port moves when its content grows.
+ * One ResizeObserver for the page, fed the port's direct children by each
+ * mounted row. It runs after layout, so its geometry reads force nothing, and
+ * it drops a child the moment the child leaves the document.
  */
-export function keepConversationFloor(): void {
-  if (floorKeeperTimer !== null) return
-  if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return
-  const tick = (): void => {
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
-    if (typeof document === 'undefined') return
-    const ports = document.querySelectorAll<HTMLElement>('[data-conversation-scroll]')
-    for (const port of ports) keepOneFloor(port)
+export function keepConversationFloor(root: HTMLElement | null): void {
+  if (root === null || typeof ResizeObserver === 'undefined') return
+  const port = root.closest<HTMLElement>('[data-conversation-scroll]')
+  if (port === null) return
+  floorObserver ??= new ResizeObserver(onTranscriptResize)
+  if (!floorStates.has(port)) floorStates.set(port, { sh: port.scrollHeight, wroteAt: Number.NaN })
+  // observe() is idempotent for an element already observed.
+  for (const child of port.children) floorObserver.observe(child)
+}
+
+function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObserver): void {
+  const ports = new Set<HTMLElement>()
+  for (const entry of entries) {
+    if (!entry.target.isConnected) {
+      observer.unobserve(entry.target)
+      continue
+    }
+    const port = entry.target.parentElement
+    if (port !== null) ports.add(port)
   }
-  floorKeeperTimer = window.setInterval(tick, FOLLOW_FLOOR_KEEPER_MS) as unknown as number
-  if (typeof window.addEventListener === 'function') {
-    window.addEventListener('pagehide', () => {
-      if (floorKeeperTimer === null) return
-      clearInterval(floorKeeperTimer)
-      floorKeeperTimer = null
-    })
-  }
+  for (const port of ports) keepOneFloor(port)
 }
 
 function keepOneFloor(port: HTMLElement): void {
   const sh = port.scrollHeight
+  const state = floorStates.get(port) ?? { sh, wroteAt: Number.NaN }
+  const before = state.sh
+  state.sh = sh
+  floorStates.set(port, state)
+  const ch = port.clientHeight
+  if (sh <= before || ch <= 0) return
   const st = port.scrollTop
-  const previous = floorKeeperStates.get(port)
-  floorKeeperStates.set(port, { lastSh: sh, lastSt: st })
-  if (port.clientHeight <= 0) return
-  const floor = Math.max(0, sh - port.clientHeight)
-  const gap = floor - st
-  // A reader who moved the port up without this engine writing it is reading;
-  // leave them alone until they come back to the floor themselves.
-  const ledger = followScrollLedgers.get(port)
-  if (ledger !== undefined && st < ledger - 2) {
+  const ours = Math.abs(st - (followWrittenTops.get(port) ?? Number.NaN)) <= 1
+  if (!ours && before - ch - st > FOLLOW_SLACK_PX) {
+    // Publish the verdict for arms that start later (they read the hold).
     followReaderHolds.set(port, { atMs: performance.now() })
     return
   }
-  if (followReaderHolds.has(port)) {
-    if (gap <= FOLLOW_SLACK_PX) followReaderHolds.delete(port)
-    return
-  }
-  if (gap <= FOLLOW_SETTLE_EPSILON_PX) return
-  // An arm that is writing this port right now owns the floor and keeps its
-  // own runway; never close that runway from here.
+  followReaderHolds.delete(port)
+  // An arm writing this port right now owns the floor and keeps its runway.
+  // This keeper's own last write is not an arm.
   const writtenAt = followWriteAt.get(port)
-  if (writtenAt !== undefined && performance.now() - writtenAt < FOLLOW_FLOOR_STALL_MS) return
-  if (previous === undefined) return
-  // The defect signature: height added, position untouched. A following port
-  // moves when its content grows, so this cannot fire under a healthy follow.
-  if (sh <= previous.lastSh || st !== previous.lastSt) return
+  if (writtenAt !== undefined && writtenAt !== state.wroteAt
+    && performance.now() - writtenAt < FOLLOW_FLOOR_STALL_MS) return
+  const floor = sh - ch
+  if (floor - st <= FOLLOW_SETTLE_EPSILON_PX) return
   setFollowScrollTop(port, floor)
+  state.wroteAt = followWriteAt.get(port) ?? Number.NaN
 }
 
 function settleAtFloor(port: HTMLElement): void {
