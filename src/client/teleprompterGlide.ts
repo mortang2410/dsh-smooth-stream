@@ -1801,6 +1801,68 @@ function holdNaturalFloor(port: HTMLElement): void {
   }
 }
 
+/** Ports watched for post-turn growth; one entry per scrollport. */
+interface FloorWatcher {
+  expected: number
+  readerLeft: boolean
+  observer: ResizeObserver | null
+  port: HTMLElement
+}
+const floorWatchers = new WeakMap<HTMLElement, FloorWatcher>()
+
+/**
+ * Keep a settled transcript on its floor while it still grows.
+ *
+ * The streaming arm parks itself once a reply stops revealing, so a turn that
+ * keeps gaining height afterwards (tool rows, process rows, a status row
+ * leaving) grows with nothing watching it. The host drops its own follow the
+ * first time it samples a gap beyond its 25px band, and after that every block
+ * lands below the viewport. Watch the content instead of the reveal: re-pin on
+ * growth, and stand down for good once the reader moves up.
+ *
+ * @param port - Conversation scrollport whose floor should be held.
+ */
+function watchNaturalFloor(port: HTMLElement): void {
+  if (typeof ResizeObserver === 'undefined') return
+  let watcher = floorWatchers.get(port)
+  if (watcher === undefined) {
+    watcher = {
+      expected: port.scrollTop,
+      // A recorded reader hold is the only trustworthy "the reader left" signal
+      // at attach time; a bare gap is not, because a gap is the defect itself.
+      readerLeft: followReaderHolds.has(port),
+      observer: null,
+      port,
+    }
+    floorWatchers.set(port, watcher)
+    port.addEventListener('scroll', () => {
+      const current = floorWatchers.get(port)
+      if (current === undefined) return
+      const floor = Math.max(0, port.scrollHeight - port.clientHeight)
+      if (port.scrollTop >= floor - 1) {
+        current.readerLeft = false
+        current.expected = port.scrollTop
+        return
+      }
+      if (port.scrollTop < current.expected - 2) current.readerLeft = true
+    }, { passive: true })
+  }
+  const current = watcher
+  current.expected = port.scrollTop
+  if (current.observer !== null) return
+  const content = port.firstElementChild
+  if (content === null) return
+  current.observer = new ResizeObserver(() => {
+    if (current.readerLeft || followActivePorts.has(port)) return
+    if (Math.abs(port.scrollTop - current.expected) > 2) return
+    const floor = Math.max(0, port.scrollHeight - port.clientHeight)
+    if (floor - port.scrollTop <= FOLLOW_SETTLE_EPSILON_PX) return
+    setFollowScrollTop(port, floor)
+    current.expected = port.scrollTop
+  })
+  current.observer.observe(content)
+}
+
 function settleAtFloor(port: HTMLElement): void {
   followReaderHolds.delete(port)
   let attempts = 0
@@ -2978,6 +3040,10 @@ export function useConversationFollow(
           followReaderHolds.set(host, { atMs: performance.now() })
         }
         clearVisual(host)
+        // Still watch for post-turn growth: a follower that stopped early
+        // leaves a transcript that keeps gaining height with nobody on the
+        // floor, and the host has already dropped its own follow by then.
+        watchNaturalFloor(host)
         followLeaders.delete(host)
         releaseRevealScale()
         debugRuntime.reportFollow(host, null)
@@ -3024,6 +3090,7 @@ export function useConversationFollow(
           setFlowPad(host, 0)
           finishAtNaturalFloor(host, !startedAsEntrance, true)
           holdNaturalFloor(host)
+          watchNaturalFloor(host)
           followLeaders.delete(host)
           followCompletionSettle.delete(host)
           releaseRevealScale()
@@ -3034,6 +3101,7 @@ export function useConversationFollow(
         setFlowPad(host, 0)
         finishAtNaturalFloor(host, !startedAsEntrance, true)
         holdNaturalFloor(host)
+        watchNaturalFloor(host)
         followLeaders.delete(host)
         followCompletionSettle.delete(host)
         releaseRevealScale()
