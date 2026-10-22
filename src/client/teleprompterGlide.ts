@@ -1813,6 +1813,8 @@ function holdNaturalFloor(port: HTMLElement): void {
 interface FloorWatcher {
   readerLeft: boolean
   lastScrollAt: number
+  /** followWriteAt value of this watcher's own last write, so it is not mistaken for an arm. */
+  wroteAt: number
   observer: ResizeObserver | null
   port: HTMLElement
 }
@@ -1839,6 +1841,7 @@ export function watchNaturalFloor(port: HTMLElement): void {
       // A recorded reader hold is the only trustworthy "the reader left" signal
       // at attach time; a bare gap is not, because a gap is the defect itself.
       readerLeft: followReaderHolds.has(port),
+      wroteAt: Number.NaN,
       observer: null,
       port,
     }
@@ -1847,18 +1850,26 @@ export function watchNaturalFloor(port: HTMLElement): void {
       const current = floorWatchers.get(port)
       if (current === undefined) return
       const now = performance.now()
-      const previous = current.lastScrollAt
-      current.lastScrollAt = now
       const floor = Math.max(0, port.scrollHeight - port.clientHeight)
       // Within the host's own band of the floor counts as "at the bottom" for
       // the host, so it must count here too: landing a few pixels short must
-      // not latch the reader-left flag for the rest of the turn.
+      // not latch the reader-left flag for the rest of the turn. It must not arm
+      // the stall guard either: the observer below would then stand down for
+      // FOLLOW_FLOOR_STALL_MS over a port that is already where it wants it.
       if (floor - port.scrollTop <= FOLLOW_SLACK_PX) {
         current.readerLeft = false
         return
       }
-      // A scroll that happens while this watcher is the one writing is not a
-      // reader gesture; only an outward move with nobody writing counts.
+      // A scroll that lands on the position this engine last wrote is its own
+      // write, not a reader gesture. Arming the guard from it made the watcher
+      // silence itself for FOLLOW_FLOOR_STALL_MS after every fix, so it skipped
+      // the next growth and never retried it.
+      const own = followWrittenTops.get(port)
+      if (own !== undefined && Math.abs(port.scrollTop - own) <= 1) return
+      const previous = current.lastScrollAt
+      current.lastScrollAt = now
+      // A scroll that happens while an arm is writing this port is not a reader
+      // gesture; only an outward move with nobody writing counts.
       const writtenAt = followWriteAt.get(port)
       if (writtenAt !== undefined && now - writtenAt < FOLLOW_FLOOR_STALL_MS) return
       if (now - previous < 200) return
@@ -1878,14 +1889,19 @@ export function watchNaturalFloor(port: HTMLElement): void {
     // port at all while the turn keeps growing it.
     if (current.readerLeft) return
     const now = performance.now()
+    // An arm that wrote this port within the stall window owns the floor. This
+    // watcher's own write is excluded by identity: setFollowScrollTop sets
+    // followWriteAt, so a time-only test made it stand down over its own work
+    // and skip the next growth.
     const writtenAt = followWriteAt.get(port)
-    if (writtenAt !== undefined && now - writtenAt < FOLLOW_FLOOR_STALL_MS) return
+    if (writtenAt !== undefined && writtenAt !== current.wroteAt && now - writtenAt < FOLLOW_FLOOR_STALL_MS) return
     // Something is moving the port right now (a reader gesture, a host glide):
-    // never write on top of it.
+    // never write on top of it. lastScrollAt only counts foreign scrolls.
     if (now - current.lastScrollAt < FOLLOW_FLOOR_STALL_MS) return
     const floor = Math.max(0, port.scrollHeight - port.clientHeight)
     if (floor - port.scrollTop <= FOLLOW_SETTLE_EPSILON_PX) return
     setFollowScrollTop(port, floor)
+    current.wroteAt = followWriteAt.get(port) ?? Number.NaN
   })
   current.observer.observe(content)
 }
