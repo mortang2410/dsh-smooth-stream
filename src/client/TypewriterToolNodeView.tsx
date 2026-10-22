@@ -214,7 +214,11 @@ export function wrapFollowNodeView(
     }, [])
     return (
       <FollowHost
-        active={growing}
+        // Keep the floor owner armed through the growth pulse as well: a tool
+        // row grows in bursts, and dropping the arm between bursts leaves the
+        // transcript with no owner, so the host samples a gap past its 25px
+        // band and shows jump-to-bottom until the next burst.
+        active={growing || growthPulse}
         entrance={entering || growthPulse}
         onEntranceSettled={finishEntrance}
         onGrowth={followable ? onGrowth : undefined}
