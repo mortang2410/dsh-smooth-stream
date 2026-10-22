@@ -113,6 +113,13 @@ export const FOLLOW_GESTURE_MS = 800
 export const FOLLOW_SETTLE_EPSILON_PX = 0.25
 
 /**
+ * Completion settle schedule for the natural-floor hold. Same delays as the
+ * reasoning card's own settle: the settled re-render, the status-row removal
+ * and a reopened card's glide all land inside this window.
+ */
+const FOLLOW_FLOOR_HOLD_MS = [120, 500, 1200, 2500] as const
+
+/**
  * How long the completion settle waits for the HOST's completion cascade —
  * status-row swap, think auto-collapse, metrics-tail mount — to stop moving
  * the scroll extent before the follower releases the port. Releasing earlier
@@ -1757,6 +1764,43 @@ function finishAtNaturalFloor(
   })
 }
 
+/** Pending post-turn floor holds, cleared whenever a new arm takes the port. */
+const followFloorHolds = new WeakMap<HTMLElement, number[]>()
+
+/**
+ * Keep a settled transcript on its natural floor while the completion settles.
+ *
+ * The host keeps its own bottom-follow bit only inside its 25px slack band, and
+ * it samples that band from a scroll event. A completion that ends a couple of
+ * pixels short, or that grows after the last follow write (status row removal,
+ * settled re-render, the reader's own composer resizing the viewport), leaves
+ * the host outside the band with nothing left to re-pin it: follow is dropped,
+ * jump-to-bottom appears, and every later line lands off screen.
+ *
+ * Re-pin on the same short schedule the reasoning card already uses for its own
+ * settle, and stop the moment anything else moves the port.
+ *
+ * @param port - Settled conversation scrollport that was at its floor.
+ */
+function holdNaturalFloor(port: HTMLElement): void {
+  const previous = followFloorHolds.get(port)
+  if (previous !== undefined) for (const id of previous) clearTimeout(id)
+  const ids: number[] = []
+  followFloorHolds.set(port, ids)
+  let expected = port.scrollTop
+  for (const delay of FOLLOW_FLOOR_HOLD_MS) {
+    ids.push(window.setTimeout(() => {
+      // A new arm owns the port again, or a reader moved it: stand down.
+      if (followActivePorts.has(port)) return
+      if (Math.abs(port.scrollTop - expected) > 0.5) return
+      const floor = Math.max(0, port.scrollHeight - port.clientHeight)
+      if (floor - port.scrollTop <= FOLLOW_SETTLE_EPSILON_PX) return
+      setFollowScrollTop(port, floor)
+      expected = port.scrollTop
+    }, delay))
+  }
+}
+
 function settleAtFloor(port: HTMLElement): void {
   followReaderHolds.delete(port)
   let attempts = 0
@@ -2979,6 +3023,7 @@ export function useConversationFollow(
           restoreRunway(host)
           setFlowPad(host, 0)
           finishAtNaturalFloor(host, !startedAsEntrance, true)
+          holdNaturalFloor(host)
           followLeaders.delete(host)
           followCompletionSettle.delete(host)
           releaseRevealScale()
@@ -2988,6 +3033,7 @@ export function useConversationFollow(
         restoreRunway(host)
         setFlowPad(host, 0)
         finishAtNaturalFloor(host, !startedAsEntrance, true)
+        holdNaturalFloor(host)
         followLeaders.delete(host)
         followCompletionSettle.delete(host)
         releaseRevealScale()
