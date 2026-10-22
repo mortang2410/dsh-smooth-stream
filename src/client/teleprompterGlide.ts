@@ -1952,6 +1952,10 @@ function keepOneFloor(port: HTMLElement): void {
     return
   }
   if (gap <= FOLLOW_SETTLE_EPSILON_PX) return
+  // An arm that is writing this port right now owns the floor and keeps its
+  // own runway; never close that runway from here.
+  const writtenAt = followWriteAt.get(port)
+  if (writtenAt !== undefined && performance.now() - writtenAt < FOLLOW_FLOOR_STALL_MS) return
   if (previous === undefined) return
   // The defect signature: height added, position untouched. A following port
   // moves when its content grows, so this cannot fire under a healthy follow.
