@@ -1939,6 +1939,8 @@ interface FloorState {
   intentAt: number
   lastTop: number
   reader: boolean
+  /** Whether the port was at its floor the last time this keeper looked. */
+  atFloor: boolean
 }
 const floorStates = new WeakMap<HTMLElement, FloorState>()
 let floorObserver: ResizeObserver | null = null
@@ -1998,12 +2000,12 @@ export function keepConversationFloor(root: HTMLElement | null): void {
       lastTop: port.scrollTop,
       // A recorded hold means the reader left before this row mounted.
       reader: followReaderHolds.has(port),
+      // A port that mounts above its floor is showing a position the host
+      // restored, not a residue this keeper may close.
+      atFloor: port.scrollHeight - port.clientHeight - port.scrollTop <= FOLLOW_SETTLE_EPSILON_PX,
     }
     floorStates.set(port, state)
     attachFloorSettle(port, state)
-    // A port can already be a few pixels high when a row mounts, with no scroll
-    // or growth left to report it. One check here closes that.
-    settleFloorIfResidue(port, state)
   }
   // observe() is idempotent for an element already observed.
   for (const box of portContentBoxes(port)) floorObserver.observe(box)
@@ -2025,10 +2027,11 @@ const FLOOR_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown',
  * check runs there and never on a clock. Reader input is recorded here so a
  * scroll a reader made is never pulled back.
  *
- * Only input that can move this transcript counts. The composer seat is a child
- * of the port, so a bare keydown or pointerdown listener counted typing a prompt
- * as reader intent, which stood the keeper down exactly while the user typed the
- * next message.
+ * Only input that can move this transcript counts: an upward wheel, a pan (a tap
+ * is not a pan), a pointerdown on the port's own scrollbar, a scroll key not
+ * typed into a field. The composer seat is a child of the port, so a bare
+ * keydown or pointerdown listener counted typing a prompt as reader intent,
+ * which stood the keeper down exactly while the user typed the next message.
  *
  * @param port - Conversation scrollport.
  * @param state - That port's keeper state.
@@ -2038,7 +2041,7 @@ function attachFloorSettle(port: HTMLElement, state: FloorState): void {
   port.addEventListener('wheel', (event) => {
     if (event.deltaY < 0) markIntent()
   }, { passive: true, capture: true })
-  port.addEventListener('touchstart', (event) => {
+  port.addEventListener('touchmove', (event) => {
     const target = event.target
     if (target instanceof Element && target.closest('[data-composer-seat]') !== null) return
     markIntent()
@@ -2077,18 +2080,24 @@ function attachFloorSettle(port: HTMLElement, state: FloorState): void {
 /**
  * Close a gap that motion left just above the floor.
  *
- * Runs on `scrollend` and once at attach. Only a gap inside the residue band is
- * closed, and only when no reader input was recorded in the intent window, so a
- * reader's own scroll is left alone.
+ * Runs on `scrollend`. Only a gap inside the residue band is closed, only when
+ * a reader is not holding the port, and only when the keeper last saw the port
+ * on its floor: a port that arrived high, by host restore or by a different
+ * conversation rendered into the same element, is not a residue.
  *
  * @param port - Conversation scrollport.
  * @param state - That port's keeper state.
  */
 function settleFloorIfResidue(port: HTMLElement, state: FloorState): void {
-  const floor = port.scrollHeight - port.clientHeight
+  const sh = port.scrollHeight
+  // Only close a gap against the geometry the keeper last evaluated. A size
+  // change since then means this scroll belongs to new layout, which the next
+  // growth delivery classifies on its own.
+  if (sh !== state.sh) return
+  const floor = sh - port.clientHeight
   const gap = floor - port.scrollTop
   if (gap <= FOLLOW_SETTLE_EPSILON_PX || gap > FOLLOW_RESIDUE_PX) return
-  if (state.reader || performance.now() - state.intentAt < FOLLOW_INTENT_WINDOW_MS) return
+  if (state.reader || !state.atFloor) return
   followReaderHolds.delete(port)
   setFollowScrollTop(port, floor)
   state.wroteAt = followWriteAt.get(port) ?? Number.NaN
@@ -2112,20 +2121,39 @@ function onTranscriptResize(entries: ResizeObserverEntry[], observer: ResizeObse
 function keepOneFloor(port: HTMLElement): void {
   const sh = port.scrollHeight
   const state = floorStates.get(port)
-    ?? { sh, wroteAt: Number.NaN, intentAt: Number.NEGATIVE_INFINITY, lastTop: port.scrollTop, reader: false }
+    ?? {
+      sh,
+      wroteAt: Number.NaN,
+      intentAt: Number.NEGATIVE_INFINITY,
+      lastTop: port.scrollTop,
+      reader: false,
+      atFloor: false,
+    }
   const before = state.sh
   state.sh = sh
   floorStates.set(port, state)
   const ch = port.clientHeight
-  if (sh <= before || ch <= 0) return
+  if (ch <= 0) return
   const st = port.scrollTop
+  const floor = sh - ch
+  const gapNow = floor - st
+  // A scrollHeight that changes by a whole viewport in one delivery is a
+  // different conversation rendered into the same port, not growth: the
+  // position it lands on is the host's restore, which is a reader position.
+  if (Math.abs(sh - before) > ch) state.atFloor = false
+  if (gapNow <= FOLLOW_SETTLE_EPSILON_PX) {
+    state.atFloor = true
+    state.reader = false
+    followReaderHolds.delete(port)
+  }
+  if (sh <= before) return
   const gap = before - ch - st
   const ours = Math.abs(st - (followWrittenTops.get(port) ?? Number.NaN)) <= 1
-  if (gap <= FOLLOW_SETTLE_EPSILON_PX) state.reader = false
-  // A reader position is one this engine did not put there: either the port is
-  // far above the floor, or reader input moved it up by any amount. Only a port
-  // that is still where we left it, a little high, is our own layout residue.
-  if (state.reader || (!ours && gap > FOLLOW_RESIDUE_PX)) {
+  // A reader position is one this engine did not put there: reader input moved
+  // it up, or it has been off the floor since before this growth. Only a port
+  // the keeper last saw on its floor, a little high, is our own layout residue.
+  if (state.reader || (!state.atFloor && gapNow > FOLLOW_SETTLE_EPSILON_PX)
+    || (!ours && gap > FOLLOW_RESIDUE_PX)) {
     // Publish the verdict for arms that start later (they read the hold).
     followReaderHolds.set(port, { atMs: performance.now() })
     return
@@ -2136,10 +2164,10 @@ function keepOneFloor(port: HTMLElement): void {
   const writtenAt = followWriteAt.get(port)
   if (writtenAt !== undefined && writtenAt !== state.wroteAt
     && performance.now() - writtenAt < FOLLOW_FLOOR_STALL_MS) return
-  const floor = sh - ch
-  if (floor - st > FOLLOW_SETTLE_EPSILON_PX) {
+  if (gapNow > FOLLOW_SETTLE_EPSILON_PX) {
     setFollowScrollTop(port, floor)
     state.wroteAt = followWriteAt.get(port) ?? Number.NaN
+    state.atFloor = true
   }
 }
 
