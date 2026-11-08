@@ -2182,12 +2182,21 @@ function keepOneFloor(port: HTMLElement): void {
   const floor = sh - ch
   const gapNow = floor - st
   const ours = Math.abs(st - (followWrittenTops.get(port) ?? Number.NaN)) <= 1
+  // Where the port sat before this delivery, measured against the floor this
+  // delivery replaced. A port this engine last saw on its floor can still come to
+  // rest a few pixels above it: the host's smooth follow lands on a floor the
+  // transcript has already outgrown, and scroll anchoring moves the port as rows
+  // above it change. That residue is still this engine's position, so a growth
+  // wider than the viewport is a large chunk arriving, not a different
+  // conversation restored into this port, and this delivery must not withdraw
+  // the floor sighting that lets later growth follow.
+  const nearFloor = before - ch - st <= FOLLOW_RESIDUE_PX
   // A different conversation rendered into the same port lands wherever the
   // host restored it, and that position is not ours to correct. Size alone
   // cannot say so: a real growth can be taller than the viewport, and a replaced
   // conversation can be shorter. What separates them is that the port did not
-  // sit still where this engine left it.
-  if (!ours && Math.abs(sh - before) > ch) {
+  // rest near the floor this engine was holding.
+  if (!nearFloor && Math.abs(sh - before) > ch) {
     state.atFloor = false
     state.trusted = false
   }
