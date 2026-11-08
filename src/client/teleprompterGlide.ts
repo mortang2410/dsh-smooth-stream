@@ -2864,8 +2864,15 @@ export function useConversationFollow(
       if (typeof MutationObserver !== 'undefined') {
         const flow = flowElementOf(port)
         if (flow !== null) {
-          mutations = new MutationObserver(() => {
+          mutations = new MutationObserver((records) => {
             wakeFollowClock()
+            // The engine's own reveal writes text in place, and the reveal
+            // commit already lands the pre-paint correction for those. Running
+            // a second forced layout here for every one of them doubles the
+            // per-chunk cost while streaming. A host-side text rewrite has no
+            // commit, so it still wakes the loop and the next frame paints the
+            // new floor.
+            if (records.every((record) => record.type === 'characterData')) return
             invalidateSurfaceCache(port)
             restoreBeforePaint()
           })

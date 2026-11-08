@@ -3185,6 +3185,16 @@ describe('assistant renderer', () => {
     // running at display rate through every tool call and every pause.
     expect(FrameCoordinator.forDocument().active).toBe(false)
 
+    // A host-side text rewrite in place (a status counter, a metric tail) has
+    // no commit and no child-list transaction; it still has to wake the loop.
+    const label = view.container.querySelector('[data-chat-transcript]')?.firstChild as Text | null
+    if (label === null) throw new Error('fixture lost its transcript text node')
+    label.data = `${label.data} updated`
+    await act(async () => { await Promise.resolve() })
+    expect(FrameCoordinator.forDocument().active).toBe(true)
+    await act(() => vi.advanceTimersByTimeAsync(200))
+    expect(FrameCoordinator.forDocument().active).toBe(false)
+
     // The next commit brings it back and the follower lands on the new floor.
     height = 560
     wakeFollowClock()
