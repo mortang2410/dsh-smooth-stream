@@ -65,3 +65,20 @@ it('commits every frame that rewrites text so the follower corrects before paint
   expect(commit).toHaveBeenCalled()
   for (const [called] of commit.mock.calls) expect(called).toBe(root)
 })
+
+it('commits the settle write that reveals the rest of the row', () => {
+  const clock = installClock()
+  FrameCoordinator.forDocument().shutdown()
+  const view = render(<Probe text="alpha beta gamma delta" speed={600} />)
+  const root = view.container.querySelector('[data-progressive]') as HTMLElement
+
+  clock.frame(1000)
+  clock.frame(1016)
+  commit.mockClear()
+
+  // Unmount settles every controlled node to its full text in one write, the
+  // largest growth the row ever takes; the follower has to hear about it.
+  view.unmount()
+  expect(commit).toHaveBeenCalled()
+  for (const [called] of commit.mock.calls) expect(called).toBe(root)
+})

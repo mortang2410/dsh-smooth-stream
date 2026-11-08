@@ -140,16 +140,22 @@ export function useProgressiveDomText(
     }
 
     /**
-     * Returns whether the node's data actually changed. A writer that reveals
-     * text this way has to tell the follower, because the follower's
-     * pre-paint correction is driven by the reveal commit and its mutation
-     * observer deliberately skips character-data batches.
+     * A writer that reveals text this way has to tell the follower, because the
+     * follower's pre-paint correction is driven by the reveal commit and its
+     * mutation observer deliberately skips character-data batches. Every write
+     * path here marks the batch dirty and the caller commits once, after it.
      */
-    const write = (node: Text, value: string): boolean => {
-      if (node.data === value) return false
+    let textDirty = false
+    const commitWrites = (): void => {
+      if (!textDirty) return
+      textDirty = false
+      notifyFollowCommit(root)
+    }
+    const write = (node: Text, value: string): void => {
+      if (node.data === value) return
       internalWrites.set(node, value)
       node.data = value
-      return true
+      textDirty = true
     }
 
     const enqueue = (node: Text, full: string, preserve: TextRevealRecord | undefined): void => {
@@ -220,7 +226,6 @@ export function useProgressiveDomText(
       debt = step.debt
       speedCpsRef.current = step.speedCps
       let remaining = step.revealChars
-      let wroteText = false
       for (const node of [...pending]) {
         if (remaining <= 0) break
         const record = records.get(node)
@@ -233,13 +238,13 @@ export function useProgressiveDomText(
         const shown = record.shown + amount
         const next = { ...record, shown }
         records.set(node, next)
-        if (write(node, next.chars.slice(0, shown).join(''))) wroteText = true
+        write(node, next.chars.slice(0, shown).join(''))
         remaining -= amount
         if (shown >= next.chars.length) pending.delete(node)
       }
       // One commit per frame, after the batch, so the follower lands its
       // pre-paint correction in this same task instead of a frame later.
-      if (wroteText) notifyFollowCommit(root)
+      commitWrites()
       let targetChars = 0
       let displayedChars = 0
       let nextBacklog = 0
@@ -273,6 +278,7 @@ export function useProgressiveDomText(
     }
 
     visit(root, revealInitial)
+    commitWrites()
 
     const observer = typeof MutationObserver === 'undefined'
       ? null
@@ -291,6 +297,10 @@ export function useProgressiveDomText(
             for (const removed of mutation.removedNodes) forget(removed)
             for (const added of mutation.addedNodes) visit(added, true)
           }
+          // The preserve write above can grow a row on its own (a settled
+          // replacement that keeps the revealed prefix); commit that batch so
+          // its wrap still corrects before paint.
+          commitWrites()
           if (pending.size === 0) announceSettled()
           else scheduleFrame()
         })
@@ -311,6 +321,9 @@ export function useProgressiveDomText(
           write(node, record.full)
         }
       }
+      // The settle write above reveals the remaining text in one step, the
+      // largest growth of the row; commit it while the port is still there.
+      commitWrites()
       pending.clear()
       speedCpsRef.current = 35
       debugRuntime.reportStream(streamId, null)
