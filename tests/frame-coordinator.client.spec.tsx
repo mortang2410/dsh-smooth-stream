@@ -88,14 +88,13 @@ describe('FrameCoordinator', () => {
       onWrite: () => order.push('write'),
     })
 
-    // Frame 1 only establishes the time base; frame 2 runs the phases.
+    // No read is owed yet, so the first frame simulates and writes only.
     clock.frame(1000)
-    clock.frame(1016)
     expect(order).toEqual(['simulate', 'write'])
 
     order.length = 0
     coordinator.markLayoutDirty()
-    clock.frame(1032)
+    clock.frame(1016)
     expect(order).toEqual(['read', 'simulate', 'write'])
   })
 
@@ -105,8 +104,7 @@ describe('FrameCoordinator', () => {
     coordinator.registerTask({ onSimulate: (_dt, now) => { seen.push(now); return true } })
 
     clock.frame(1000)
-    clock.frame(1016)
-    expect(seen).toEqual([1016, 1016])
+    expect(seen).toEqual([1000, 1000])
   })
 
   it('parks the clock once no task is active, and wakes on request', () => {
@@ -125,6 +123,47 @@ describe('FrameCoordinator', () => {
     const before = clock.rafCalls
     coordinator.markLayoutDirty()
     expect(clock.rafCalls).toBe(before + 1)
+  })
+
+  it('parks after a frame that painted but asked for nothing more', () => {
+    const write = vi.fn()
+    coordinator.registerTask({ onSimulate: () => false, onWrite: write })
+
+    clock.frame(1000)
+    expect(write).toHaveBeenCalledTimes(1)
+    // Painting is not a request for another frame: a helper that marks layout
+    // dirty on every pass would keep an idle document at display rate.
+    expect(coordinator.active).toBe(false)
+    expect(clock.rafCalls).toBe(1)
+  })
+
+  it('marks only the first task-running tick after a park as resumed', () => {
+    let keepAlive = true
+    const resumed: boolean[] = []
+    coordinator.registerTask({
+      onSimulate: () => {
+        resumed.push(coordinator.resumedFromIdle)
+        return keepAlive
+      },
+    })
+
+    // The coordinator starts parked, so its first tick is a resumed one; the
+    // ticks that follow while the task keeps the clock alive are not.
+    clock.frame(1000)
+    expect(resumed).toEqual([true])
+    clock.frame(1016)
+    expect(resumed).toEqual([true, false])
+
+    keepAlive = false
+    clock.frame(1032)
+    expect(resumed).toEqual([true, false, false])
+    expect(coordinator.active).toBe(false)
+
+    // Waking a parked clock flags exactly that next tick.
+    coordinator.markLayoutDirty()
+    clock.frame(9000)
+    expect(resumed).toEqual([true, false, false, true])
+    expect(coordinator.active).toBe(false)
   })
 
   it('reuses one coordinator per document', () => {

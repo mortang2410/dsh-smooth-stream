@@ -39,10 +39,24 @@ export function useFpsGuard(active: boolean): {
       const fps = fpsRef.current
       if (fps.lastMs === 0) {
         fps.lastMs = now
-        return true
+        return false
       }
-      const delta = Math.min(MAX_FRAME_MS, Math.max(1, now - fps.lastMs))
+      const gap = now - fps.lastMs
+      // The monitor reads frames the reveal already drives; it must never be
+      // the reason a frame runs. The first tick after the clock parked carries
+      // the whole idle gap, which says nothing about the page's frame rate: it
+      // re-bases the window rather than scoring 4 fps and holding back commits.
+      // A stall the page really dropped keeps the clock armed, so the gap there
+      // still counts and still trips the guard.
+      if (FrameCoordinator.forDocument().resumedFromIdle) {
+        fps.lastMs = now
+        fps.emaMs = 0
+        fps.healthyRun = 0
+        fps.degraded = false
+        return false
+      }
       fps.lastMs = now
+      const delta = Math.min(MAX_FRAME_MS, Math.max(1, gap))
       fps.emaMs = fps.emaMs === 0 ? delta : fps.emaMs + FPS_ALPHA * (delta - fps.emaMs)
       const currentFps = 1000 / fps.emaMs
       if (currentFps < FPS_THRESHOLD) {
@@ -56,7 +70,7 @@ export function useFpsGuard(active: boolean): {
         debugRuntime.reportFps(currentFps, fps.emaMs, fps.degraded)
         lastDebugReport = now
       }
-      return true
+      return false
     }
     // The frame-rate monitor no longer owns a rAF chain of its own: it rides
     // the shared document clock and only re-arms while the reply is streaming.

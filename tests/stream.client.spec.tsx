@@ -16,6 +16,7 @@ import {
 } from 'react'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { TypewriterAssistantNodeView } from '../src/client/TypewriterAssistantNodeView.tsx'
+import { FrameCoordinator } from '../src/client/FrameCoordinator.ts'
 import {
   computeFollowRevealScale,
   computeFollowReserve,
@@ -27,6 +28,7 @@ import {
   FOLLOW_STATUS_RUNWAY_PX,
   FOLLOW_RESERVE_MIN_PX,
   FollowRevealPhaseTracker,
+  notifyFollowCommit,
   useConversationFollow,
 } from '../src/client/teleprompterGlide.ts'
 import {
@@ -93,6 +95,17 @@ function assistantProps(
     fileMentions: () => undefined,
     t: (key: string) => (key === 'message.think' ? chatZh['message.think'] : key),
   } as unknown as Parameters<typeof TypewriterAssistantNodeView>[0]
+}
+
+/**
+ * The follower parks its clock when the transcript is at rest, and a real
+ * browser hands it a frame back through an observer or a scroll event. These
+ * cases move geometry through a mocked scrollHeight getter and write scrollTop
+ * directly, neither of which jsdom reports, so the wake they simulate has to be
+ * raised here or the case would test the harness instead of the engine.
+ */
+function wakeFollowClock(): void {
+  FrameCoordinator.forDocument().markLayoutDirty()
 }
 
 function currentTranslate(element: HTMLElement): number {
@@ -471,6 +484,7 @@ describe('assistant renderer', () => {
     port.scrollTop = 400
     await act(() => vi.advanceTimersByTimeAsync(240))
     baseHeight += 28
+    wakeFollowClock()
     await act(() => vi.advanceTimersByTimeAsync(16))
     const shiftedWithoutTooltip = currentTranslate(transcript)
     expect(shiftedWithoutTooltip).toBeGreaterThan(0)
@@ -497,6 +511,7 @@ describe('assistant renderer', () => {
     // Once the tooltip closes, the next follow frame resumes the shift.
     tooltip.remove()
     baseHeight += 28
+    wakeFollowClock()
     await act(() => vi.advanceTimersByTimeAsync(16))
     expect(currentTranslate(transcript)).toBeGreaterThan(0)
   })
@@ -1966,12 +1981,15 @@ describe('assistant renderer', () => {
     // One disagreement can be a browser clamp. Two prove that another
     // bottom-follow writer is active; the engine must not keep overwriting it.
     port.scrollTop = 390
+    fireEvent.scroll(port)
     await act(() => vi.advanceTimersByTimeAsync(16))
     port.scrollTop = 390
+    fireEvent.scroll(port)
     await act(() => vi.advanceTimersByTimeAsync(16))
     expect(port.scrollTop).toBe(400)
 
     port.scrollTop = 380
+    fireEvent.scroll(port)
     await act(() => vi.advanceTimersByTimeAsync(80))
     expect(port.scrollTop).toBe(380)
   })
@@ -2024,6 +2042,7 @@ describe('assistant renderer', () => {
     await act(() => vi.advanceTimersByTimeAsync(80))
 
     height = 620
+    wakeFollowClock()
     await act(() => vi.advanceTimersByTimeAsync(80))
     expect(port.getAttribute('data-follow-owned')).not.toBeNull()
     expect(port.scrollTop).toBe(520)
@@ -2057,6 +2076,7 @@ describe('assistant renderer', () => {
     await act(() => vi.advanceTimersByTimeAsync(80))
     expect(port.getAttribute('data-follow-owned')).not.toBeNull()
     Object.defineProperty(port, 'scrollHeight', { configurable: true, value: 650 })
+    wakeFollowClock()
     await act(() => vi.advanceTimersByTimeAsync(400))
     expect(port.scrollTop).toBeGreaterThan(400)
   })
@@ -3127,6 +3147,43 @@ describe('assistant renderer', () => {
     expect(port.scrollTop).toBeCloseTo(620, 5)
     await act(() => vi.advanceTimersByTimeAsync(400))
     expect(port.scrollTop).toBeGreaterThan(618)
+  })
+
+  it('parks the shared clock once the transcript is at rest, and a growth wakes it', async () => {
+    let height = 500
+    // The dsh 0.2.x running row is the last flow child for the whole running
+    // session, and the predictive runway lives on it. That is exactly the
+    // stretch this parks through: thinking and tool calls, where no text
+    // arrives but a status row is on screen.
+    const view = render(
+      <div data-conversation-scroll>
+        <div data-chat-flow>
+          <FollowProbe active />
+          <div data-chat-running role="status">Running</div>
+        </div>
+      </div>,
+    )
+    const port = view.container.querySelector('[data-conversation-scroll]') as HTMLElement
+    Object.defineProperty(port, 'clientHeight', { configurable: true, value: 100 })
+    Object.defineProperty(port, 'scrollHeight', { configurable: true, get: () => height })
+    port.scrollTop = 400
+    await act(() => vi.advanceTimersByTimeAsync(600))
+    // A commit with the running row on screen opens the predictive runway, and
+    // the loop still has to park with it open once nothing more is owed.
+    const transcript = view.container.querySelector('[data-chat-transcript]') as HTMLElement
+    act(() => notifyFollowCommit(transcript))
+    await act(() => vi.advanceTimersByTimeAsync(600))
+    const running = view.container.querySelector('[data-chat-running]') as HTMLElement
+    expect(Number.parseFloat(running.style.marginTop) || 0).toBeGreaterThan(0)
+    // Nothing moves and nothing is owed, so the shared clock stops instead of
+    // running at display rate through every tool call and every pause.
+    expect(FrameCoordinator.forDocument().active).toBe(false)
+
+    // The next commit brings it back and the follower lands on the new floor.
+    height = 560
+    wakeFollowClock()
+    await act(() => vi.advanceTimersByTimeAsync(80))
+    expect(port.scrollTop).toBe(460)
   })
 
   it('keeps the turn-status chrome in natural flow before the port has scroll room', async () => {

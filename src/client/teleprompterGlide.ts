@@ -135,6 +135,16 @@ export const FOLLOW_GESTURE_MS = 800
 export const FOLLOW_SETTLE_EPSILON_PX = 0.25
 
 /**
+ * Rest thresholds for the follow clock. The loop parks instead of running at
+ * display rate once the floor is reached, nothing is gliding and the painted
+ * shift stopped changing; below these values one more frame cannot move a
+ * visible pixel, and the next commit, resize, mutation, gesture or host scroll
+ * wakes it again.
+ */
+export const FOLLOW_REST_VELOCITY_PX_PER_SEC = 0.5
+export const FOLLOW_REST_SHIFT_EPSILON_PX = 0.1
+
+/**
  * Completion settle schedule for the natural-floor hold. Same delays as the
  * reasoning card's own settle: the settled re-render, the status-row removal
  * and a reopened card's glide all land inside this window.
@@ -1466,6 +1476,7 @@ function applyVisual(
   trajectoryShiftPx?: number,
   dtMs = 16.7,
   writeScrollTop = true,
+  armNextFrame = true,
 ): number {
   const surfaces = shiftSurfacesOf(port)
   ensureFlowFillsPort(port)
@@ -1509,7 +1520,7 @@ function applyVisual(
       remainingRevealChars: followRemainingRevealChars,
     })
     for (const surface of surfaces) setShift(surface, 0)
-    FrameCoordinator.forDocument().markLayoutDirty()
+    if (armNextFrame) FrameCoordinator.forDocument().markLayoutDirty()
     return contentHeight
   }
   // A runway added while the column still fit the viewport was absorbed by
@@ -1704,10 +1715,13 @@ function applyVisual(
   for (const surface of surfaces) setShift(surface, shift)
   const status = turnStatusOf(port)
   if (status !== null) setShift(status, 0)
-  // This pass wrote layout-affecting state (padding, min-height, an owned
-  // scrollTop, surface transforms). Mark geometry dirty so the shared clock
-  // re-reads it at the top of the NEXT frame instead of mid-write.
-  FrameCoordinator.forDocument().markLayoutDirty()
+  // A pass that runs INSIDE a frame leaves the next frame to its task's own
+  // return value: arming here made every painted frame request another one, so
+  // the loop could never park and an idle transcript still cost sixty frames a
+  // second. A pass run OUTSIDE a frame (the pre-paint restore, the completion
+  // handoff) still arms one, because that read and the bookkeeping it feeds
+  // land on the next tick.
+  if (armNextFrame) FrameCoordinator.forDocument().markLayoutDirty()
   return effectiveExtent
 }
 
@@ -2323,12 +2337,26 @@ export function useConversationFollow(
       })
     }
     nudgeFollowHandshake()
+    /**
+     * Hand the shared clock one frame of follow work.
+     *
+     * The loop parks itself the moment the transcript is at rest, so anything
+     * that can move the floor or the reader has to wake it: a reveal commit, a
+     * resize, a child-list transaction, a reader gesture, a scroll the host
+     * wrote, and the tab becoming visible again. A wake only schedules a frame;
+     * whether that frame writes anything stays the engine's own decision.
+     */
+    const wakeFollowClock = (): void => {
+      FrameCoordinator.forDocument().markLayoutDirty()
+    }
     let last = performance.now()
     let following = true
     let primed = false
     let animatedH = 0
     let reservePx = 0
     let velocityPxPerSec = 0
+    /** Painted shift of the previous frame: equal values mean the release has converged. */
+    let previousPaintedShift = 0
     /**
      * Scroll length the most recent observed commit actually added. This is the
      * honest measure of how much room the still-draining text needs, and it is
@@ -2533,6 +2561,9 @@ export function useConversationFollow(
     }
 
     const markGesture = (event: Event): void => {
+      // A reader gesture while the loop is parked still has to be answered: the
+      // release hand-off and the at-bottom handshake run inside a frame.
+      wakeFollowClock()
       interacting = true
       if (event.type === 'wheel') {
         const deltaY = (event as WheelEvent).deltaY
@@ -2797,18 +2828,27 @@ export function useConversationFollow(
       if (port === next) return
       if (port !== null) {
         for (const name of GESTURE_EVENTS) port.removeEventListener(name, markGesture)
+        port.removeEventListener('scroll', wakeFollowClock)
         resize?.disconnect()
         mutations?.disconnect()
       }
       unsubscribeCommit?.()
       port = next
       invalidatePaintLimit(port)
-      unsubscribeCommit = subscribeFollowCommit(port, () => { restoreBeforePaint() })
+      unsubscribeCommit = subscribeFollowCommit(port, () => {
+        wakeFollowClock()
+        restoreBeforePaint()
+      })
       for (const name of GESTURE_EVENTS) {
         port.addEventListener(name, markGesture, { passive: true })
       }
+      // A write the host made while the loop was parked (its own follow, a
+      // restored position, a test harness scroll) is the other way the port
+      // moves without us.
+      port.addEventListener('scroll', wakeFollowClock, { passive: true })
       if (typeof ResizeObserver !== 'undefined') {
         resize = new ResizeObserver(() => {
+          wakeFollowClock()
           invalidateSurfaceCache(port)
           restoreBeforePaint()
         })
@@ -2825,10 +2865,14 @@ export function useConversationFollow(
         const flow = flowElementOf(port)
         if (flow !== null) {
           mutations = new MutationObserver(() => {
+            wakeFollowClock()
             invalidateSurfaceCache(port)
             restoreBeforePaint()
           })
-          mutations.observe(flow, { childList: true, subtree: true })
+          // characterData too: the host also rewrites text in place (status
+          // counters, metric tails) without any child-list transaction, and a
+          // parked loop would otherwise miss the new floor.
+          mutations.observe(flow, { childList: true, subtree: true, characterData: true })
         }
       }
     }
@@ -3331,6 +3375,7 @@ export function useConversationFollow(
         trajectoryShift,
         elapsedMs,
         !hostOwnsScroll,
+        false,
       )
       if (trajectoryActive) {
         const currentShift = followLastShiftPx.get(nextPort) ?? (trajectoryShift ?? 0)
@@ -3366,9 +3411,25 @@ export function useConversationFollow(
         nextPort.scrollHeight - animatedH - runwayOffsetOf(nextPort),
       ) + entranceClampLagPx()
       if (remainingEntranceLag <= FOLLOW_SETTLE_EPSILON_PX) finishEntrance()
-      // Stay armed while the reply is streaming or the entrance is settling;
-      // the coordinator parks the loop once both are done.
-      return true
+      // Park the shared clock as soon as one more frame could not move a visible
+      // pixel: floor reached, no glide, no entrance, and the painted release
+      // converged. Everything that can restart motion wakes it again, so an idle
+      // transcript between chunks costs zero frames instead of sixty a second.
+      //
+      // The predictive trajectory does NOT veto rest. It is engaged for the
+      // whole streaming turn (an open runway and no think card), including the
+      // tool-call stretch where nothing arrives; requiring it to be off meant
+      // the loop could never park in the phase this exists for. A trajectory
+      // that still owes motion changes the painted shift every frame, and that
+      // is what the convergence test below reads.
+      const paintedShift = followLastShiftPx.get(nextPort) ?? 0
+      const shiftConverged = Math.abs(paintedShift - previousPaintedShift) <= FOLLOW_REST_SHIFT_EPSILON_PX
+      previousPaintedShift = paintedShift
+      const atRest = entranceClamp === null
+        && remainingEntranceLag <= FOLLOW_SETTLE_EPSILON_PX
+        && Math.abs(velocityPxPerSec) <= FOLLOW_REST_VELOCITY_PX_PER_SEC
+        && shiftConverged
+      return !atRest
     }
 
     // Prime ownership and the final committed height in this layout phase.
@@ -3391,6 +3452,7 @@ export function useConversationFollow(
         mutations?.disconnect()
         if (port !== null) {
           for (const name of GESTURE_EVENTS) port.removeEventListener(name, markGesture)
+          port.removeEventListener('scroll', wakeFollowClock)
         }
         if (interactTimer !== null) clearTimeout(interactTimer)
         const disabledHost = rootRef.current?.closest<HTMLElement>('[data-conversation-scroll]') ?? port
@@ -3410,6 +3472,7 @@ export function useConversationFollow(
       mutations?.disconnect()
       if (port !== null) {
         for (const name of GESTURE_EVENTS) port.removeEventListener(name, markGesture)
+        port.removeEventListener('scroll', wakeFollowClock)
       }
       const root = rootRef.current
       const host = root?.closest<HTMLElement>('[data-conversation-scroll]') ?? port
@@ -3631,7 +3694,7 @@ export function useConversationFollow(
             invalidateSurfaceCache(host)
             restoreBeforePaint()
           })
-          mutations.observe(flow, { childList: true, subtree: true })
+          mutations.observe(flow, { childList: true, subtree: true, characterData: true })
         }
       }
       // From here this closure's observers are the completion guard of last
@@ -3832,6 +3895,7 @@ export function useConversationFollow(
           undefined,
           0,
           !hostOwnsScroll,
+          false,
         )
         if (traceActive()) {
           const sig = `${Math.round(host.scrollTop)}|${host.scrollHeight}|${Math.round(flowPadOf(host))}|${Math.round(reservePx)}|${settleRetiring}`

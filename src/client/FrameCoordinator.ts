@@ -32,6 +32,9 @@ export interface FrameTask {
   onWrite?: ((now: number) => void) | undefined
 }
 
+/** Step used by the first frame after the clock was parked. */
+const NOMINAL_FRAME_MS = 1000 / 60
+
 export class FrameCoordinator {
   private static coordinators = new WeakMap<Document, FrameCoordinator>()
 
@@ -44,6 +47,14 @@ export class FrameCoordinator {
    * frame. Consumers declare reads via {@link markLayoutDirty}.
    */
   private layoutDirty = false
+  /**
+   * True while the clock is stopped by its own idleness. The next tick that
+   * runs tasks reports it as a resumed frame, so a consumer that measures frame
+   * intervals can tell a parked gap from a stall the page actually dropped.
+   */
+  private parked = false
+  /** Set for the duration of the first task-running tick after a park. */
+  private resumedFrame = false
   /** One id per consumer, so an unregister cannot evict a re-registered task. */
   private nextTaskId = 0
   private doc: Document
@@ -104,13 +115,18 @@ export class FrameCoordinator {
 
     const tick = (now: number) => {
       this.rafId = null
+      this.resumedFrame = false
 
       if (this.lastTs === null) {
-        this.lastTs = now
-        // First frame after an idle gap only establishes the time base.
-        this.ensureLoop()
-        return
+        // First frame after an idle gap. It runs the phases with one nominal
+        // step instead of spending the frame on a time base: a parked clock is
+        // woken by a real change, and that change has to paint on this tick
+        // rather than one frame later.
+        this.lastTs = now - NOMINAL_FRAME_MS
       }
+
+      this.resumedFrame = this.parked
+      this.parked = false
 
       const frameIntervalMs = Math.max(0, now - this.lastTs)
       // Clamp frame delta between 1ms and 100ms to avoid physics explosions
@@ -139,6 +155,7 @@ export class FrameCoordinator {
         this.ensureLoop()
       } else if (!anyActive && !this.layoutDirty) {
         this.lastTs = null
+        this.parked = true
       }
     }
 
@@ -152,6 +169,16 @@ export class FrameCoordinator {
       this.rafId = null
     }
     this.lastTs = null
+    this.parked = true
+  }
+
+  /**
+   * Whether the tick currently running is the first one after the clock parked
+   * itself. A consumer that measures frame intervals reads this inside its
+   * simulate phase to discard the idle gap instead of scoring it as a stall.
+   */
+  get resumedFromIdle(): boolean {
+    return this.resumedFrame
   }
 
   /**
