@@ -101,6 +101,22 @@ it('follows a chunk taller than the viewport when the port drifted before any wr
   expect(port.scrollTop).toBe(520)
 })
 
+it('lands on the new floor after the viewing height shrank', () => {
+  const { port, content, grow } = portWith(1000, 600)
+  port.scrollTop = 400
+  keepConversationFloor(content)
+  // The engine writes the floor it can see.
+  grow(1010)
+  expect(port.scrollTop).toBe(410)
+
+  // The viewport shrinks while the port keeps the top the engine wrote, so the
+  // floor it was holding is now 100px below that top.
+  Object.defineProperty(port, 'clientHeight', { configurable: true, value: 500 })
+  // A growth wider than the new viewport arrives.
+  grow(1600)
+  expect(port.scrollTop).toBe(1100)
+})
+
 it('keeps a reader position the keeper saw the reader take', () => {
   const { port, content, grow } = portWith(500)
   port.scrollTop = 400

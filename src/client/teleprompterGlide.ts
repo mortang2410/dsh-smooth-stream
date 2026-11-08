@@ -2194,9 +2194,10 @@ function keepOneFloor(port: HTMLElement): void {
   // A different conversation rendered into the same port lands wherever the
   // host restored it, and that position is not ours to correct. Size alone
   // cannot say so: a real growth can be taller than the viewport, and a replaced
-  // conversation can be shorter. What separates them is that the port did not
-  // rest near the floor this engine was holding.
-  if (!nearFloor && Math.abs(sh - before) > ch) {
+  // conversation can be shorter. What separates them is that the position is
+  // neither this engine's own write nor a rest near the floor it was holding; a
+  // viewport that shrank widens that gap without anyone having scrolled.
+  if (!ours && !nearFloor && Math.abs(sh - before) > ch) {
     state.atFloor = false
     state.trusted = false
   }
