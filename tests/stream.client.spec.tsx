@@ -3164,8 +3164,15 @@ describe('assistant renderer', () => {
       </div>,
     )
     const port = view.container.querySelector('[data-conversation-scroll]') as HTMLElement
+    const running = view.container.querySelector('[data-chat-running]') as HTMLElement
     Object.defineProperty(port, 'clientHeight', { configurable: true, value: 100 })
-    Object.defineProperty(port, 'scrollHeight', { configurable: true, get: () => height })
+    // The runway the commit opens lives in the running row's margin, and the
+    // real scrollHeight includes it. A getter that omitted it would report a
+    // zero runway and never engage the predictive trajectory at all.
+    Object.defineProperty(port, 'scrollHeight', {
+      configurable: true,
+      get: () => height + (Number.parseFloat(running.style.marginTop) || 0),
+    })
     port.scrollTop = 400
     await act(() => vi.advanceTimersByTimeAsync(600))
     // A commit with the running row on screen opens the predictive runway, and
@@ -3173,7 +3180,6 @@ describe('assistant renderer', () => {
     const transcript = view.container.querySelector('[data-chat-transcript]') as HTMLElement
     act(() => notifyFollowCommit(transcript))
     await act(() => vi.advanceTimersByTimeAsync(600))
-    const running = view.container.querySelector('[data-chat-running]') as HTMLElement
     expect(Number.parseFloat(running.style.marginTop) || 0).toBeGreaterThan(0)
     // Nothing moves and nothing is owed, so the shared clock stops instead of
     // running at display rate through every tool call and every pause.
@@ -3183,7 +3189,8 @@ describe('assistant renderer', () => {
     height = 560
     wakeFollowClock()
     await act(() => vi.advanceTimersByTimeAsync(80))
-    expect(port.scrollTop).toBe(460)
+    // The floor includes the open runway, and the follower lands on it.
+    expect(port.scrollTop).toBe(560 + (Number.parseFloat(running.style.marginTop) || 0) - 100)
   })
 
   it('keeps the turn-status chrome in natural flow before the port has scroll room', async () => {

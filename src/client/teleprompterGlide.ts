@@ -3421,7 +3421,10 @@ export function useConversationFollow(
       // tool-call stretch where nothing arrives; requiring it to be off meant
       // the loop could never park in the phase this exists for. A trajectory
       // that still owes motion changes the painted shift every frame, and that
-      // is what the convergence test below reads.
+      // is what the convergence test below reads. Rest also trusts one
+      // invariant: a path that moves the trajectory while the paint holds still
+      // must set `velocityPxPerSec`, because this term is what declines rest in
+      // that case (steady streaming pins the shift and carries velocity).
       const paintedShift = followLastShiftPx.get(nextPort) ?? 0
       const shiftConverged = Math.abs(paintedShift - previousPaintedShift) <= FOLLOW_REST_SHIFT_EPSILON_PX
       previousPaintedShift = paintedShift
