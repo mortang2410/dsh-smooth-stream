@@ -12,6 +12,7 @@ import { useLayoutEffect, type RefObject } from 'react'
 import { computeAdaptiveQueueStep } from './useSmoothStreamContent.ts'
 import { debugRuntime } from './debugRuntime.ts'
 import { FrameCoordinator } from './FrameCoordinator.ts'
+import { notifyFollowCommit } from './teleprompterGlide.ts'
 
 interface TextRevealRecord {
   chars: readonly string[]
@@ -138,10 +139,17 @@ export function useProgressiveDomText(
       onSettled?.()
     }
 
-    const write = (node: Text, value: string): void => {
-      if (node.data === value) return
+    /**
+     * Returns whether the node's data actually changed. A writer that reveals
+     * text this way has to tell the follower, because the follower's
+     * pre-paint correction is driven by the reveal commit and its mutation
+     * observer deliberately skips character-data batches.
+     */
+    const write = (node: Text, value: string): boolean => {
+      if (node.data === value) return false
       internalWrites.set(node, value)
       node.data = value
+      return true
     }
 
     const enqueue = (node: Text, full: string, preserve: TextRevealRecord | undefined): void => {
@@ -212,6 +220,7 @@ export function useProgressiveDomText(
       debt = step.debt
       speedCpsRef.current = step.speedCps
       let remaining = step.revealChars
+      let wroteText = false
       for (const node of [...pending]) {
         if (remaining <= 0) break
         const record = records.get(node)
@@ -224,10 +233,13 @@ export function useProgressiveDomText(
         const shown = record.shown + amount
         const next = { ...record, shown }
         records.set(node, next)
-        write(node, next.chars.slice(0, shown).join(''))
+        if (write(node, next.chars.slice(0, shown).join(''))) wroteText = true
         remaining -= amount
         if (shown >= next.chars.length) pending.delete(node)
       }
+      // One commit per frame, after the batch, so the follower lands its
+      // pre-paint correction in this same task instead of a frame later.
+      if (wroteText) notifyFollowCommit(root)
       let targetChars = 0
       let displayedChars = 0
       let nextBacklog = 0
