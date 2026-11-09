@@ -647,9 +647,26 @@ const followFlowFillUsers = followFlowFillUsersHost[FOLLOW_FLOW_FILL_USERS_SYMBO
   ?? new WeakMap<HTMLElement, number>()
 followFlowFillUsersHost[FOLLOW_FLOW_FILL_USERS_SYMBOL] = followFlowFillUsers
 
+/**
+ * `flowElementOf` is called from every guard pass and from every consumer that
+ * needs the flow, several times per frame. The DOM only changes between frames,
+ * so the resolved node is reused while it stays connected inside the port.
+ * A cached `[data-chat-flow]` is re-resolved once a transcript wrapper appears,
+ * because the transcript wrapper must win.
+ */
+interface FlowHit { readonly element: HTMLElement; readonly viaTranscript: boolean }
+const flowHits = new WeakMap<HTMLElement, FlowHit>()
+
 function flowElementOf(port: HTMLElement): HTMLElement | null {
-  return port.querySelector<HTMLElement>('[data-chat-transcript]')
-    ?? port.querySelector<HTMLElement>('[data-chat-flow]')
+  const hit = flowHits.get(port)
+  if (hit !== undefined && hit.element.isConnected && port.contains(hit.element)) {
+    if (hit.viaTranscript || port.querySelector('[data-chat-transcript]') === null) return hit.element
+  }
+  const transcript = port.querySelector<HTMLElement>('[data-chat-transcript]')
+  const element = transcript ?? port.querySelector<HTMLElement>('[data-chat-flow]')
+  if (element === null) return null
+  flowHits.set(port, { element, viaTranscript: transcript !== null })
+  return element
 }
 
 /** Keep completion padding on the stable flow wrapper across row replacement. */
@@ -844,14 +861,31 @@ function completionSettleGuardsPort(port: HTMLElement): boolean {
  * next turn) still takes over normally and the settle yields.
  */
 
+/** Position of `child` among `parent`'s element children, without allocating an array. */
+function childIndexIn(parent: Element, child: Element): number {
+  let index = 0
+  for (const candidate of parent.children) {
+    if (candidate === child) return index
+    index += 1
+  }
+  return -1
+}
+
 function readingAnchorOf(port: HTMLElement): HTMLElement | null {
   const flow = flowElementOf(port)
   if (flow === null) return null
+  // The anchor is the LAST matching row, so walk backwards and stop at the
+  // first hit. The forward scan this replaces asked every row for a `think`
+  // variant on every frame, which the CPU profile showed as the single
+  // largest query cost inside measureReadingAnchor.
   let anchor: HTMLElement | null = null
-  for (const child of flow.children) {
+  const children = flow.children
+  for (let i = children.length - 1; i >= 0; i -= 1) {
+    const child = children[i]
     if (!(child instanceof HTMLElement)) continue
     if (child.getAttribute('data-chat-flow-kind') === 'assistant' || child.querySelector('[data-variant="think"]') !== null) {
       anchor = child
+      break
     }
   }
   return anchor ?? shiftSurfacesOf(port).at(-1) ?? null
@@ -882,7 +916,7 @@ function measureReadingAnchor(port: HTMLElement): { anchor: HTMLElement; index: 
   const scrollTop = port.scrollTop
   const scrollHeight = port.scrollHeight
   const flow = flowElementOf(port)
-  const index = flow === null ? -1 : [...flow.children].indexOf(anchor)
+  const index = flow === null ? -1 : childIndexIn(flow, anchor)
   const stored = followGuardAnchors.get(port)
   if (stored === undefined) {
     followGuardAnchors.set(port, { element: anchor, top, index, shift, pad, scrollTop, scrollHeight })
@@ -2834,6 +2868,28 @@ export function useConversationFollow(
     // notifyFollowCommit above). Subscribed per-port in bindPort.
     let unsubscribeCommit: (() => void) | null = null
 
+    /**
+     * A live stream delivers its mutation burst in many batches inside one
+     * frame: a reveal chunk per token, plus status-counter text rewrites. Each
+     * batch used to invalidate the surface cache and run a pre-paint correction
+     * immediately, and that pair rebuilds the port-wide anchor list and forces
+     * a full layout. On a long transcript that ran dozens of times a second,
+     * which the live profile showed as the engine's dominant cost. Queue it to
+     * the next animation frame instead: still before paint, at most once per
+     * frame.
+     */
+    let correctionQueued = false
+    const queuePrePaintCorrection = (): void => {
+      if (correctionQueued) return
+      correctionQueued = true
+      requestAnimationFrame(() => {
+        correctionQueued = false
+        if (port === null) return
+        invalidateSurfaceCache(port)
+        restoreBeforePaint()
+      })
+    }
+
     const bindPort = (next: HTMLElement): void => {
       if (port === next) return
       if (port !== null) {
@@ -2859,8 +2915,7 @@ export function useConversationFollow(
       if (typeof ResizeObserver !== 'undefined') {
         resize = new ResizeObserver(() => {
           wakeFollowClock()
-          invalidateSurfaceCache(port)
-          restoreBeforePaint()
+          queuePrePaintCorrection()
         })
         resize.observe(port)
         const proxy = resizeProxyOf(port)
@@ -2883,8 +2938,7 @@ export function useConversationFollow(
             // commit, so it still wakes the loop and the next frame paints the
             // new floor.
             if (records.every((record) => record.type === 'characterData')) return
-            invalidateSurfaceCache(port)
-            restoreBeforePaint()
+            queuePrePaintCorrection()
           })
           // characterData too: the host also rewrites text in place (status
           // counters, metric tails) without any child-list transaction, and a
