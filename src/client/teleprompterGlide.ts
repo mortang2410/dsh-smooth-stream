@@ -2892,7 +2892,14 @@ export function useConversationFollow(
      */
     let correctionQueued = false
     const queuePrePaintCorrection = (): void => {
-      if (correctionQueued) return
+      const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden'
+      if (correctionQueued) {
+        // A scheduled release never runs while the tab is hidden, so a batch
+        // that arrives then would be swallowed by the flag. Nothing is visible
+        // in that state, so correct every batch instead.
+        if (!hidden) return
+        correctionQueued = false
+      }
       correctionQueued = true
       const target = port
       if (target !== null) {
@@ -2902,10 +2909,7 @@ export function useConversationFollow(
       const release = (): void => {
         correctionQueued = false
       }
-      // A hidden tab produces no frames, and skipping its corrections would
-      // leave the position stale for the frame that brings it back. Nothing is
-      // visible there, so correct every batch instead of coalescing.
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      if (hidden) {
         release()
         return
       }
@@ -2925,6 +2929,11 @@ export function useConversationFollow(
       invalidatePaintLimit(port)
       unsubscribeCommit = subscribeFollowCommit(port, () => {
         wakeFollowClock()
+        // A reveal commit can land after React installed a replacement flow
+        // node while the old one is still connected inside the port. Without
+        // dropping the cached hit, the commit path resolves the old flow and
+        // compensates the node nobody sees.
+        if (port !== null) invalidateSurfaceCache(port)
         restoreBeforePaint()
       })
       for (const name of GESTURE_EVENTS) {
