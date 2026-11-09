@@ -63,24 +63,38 @@ describe('mutation burst cost', () => {
     const port = view.container.querySelector('[data-conversation-scroll]') as HTMLElement
     const transcript = view.container.querySelector('[data-chat-transcript]') as HTMLElement
     Object.defineProperty(port, 'clientHeight', { configurable: true, value: 600 })
-    Object.defineProperty(port, 'scrollHeight', { configurable: true, get: () => 900 })
+    let height = 900
+    Object.defineProperty(port, 'scrollHeight', { configurable: true, get: () => height })
     port.scrollTop = 300
     await act(() => vi.advanceTimersByTimeAsync(600))
 
     const layoutReads = vi.spyOn(Element.prototype, 'getBoundingClientRect')
     const started = performance.now()
 
-    // Twelve sibling insertions inside one frame, the shape a reveal burst takes.
+    // Twelve sibling insertions inside one frame, the shape a reveal burst
+    // takes. Each one also grows the content, so the floor moves and a
+    // correction that never runs is visible in the scroll position.
     for (let index = 0; index < MUTATIONS; index += 1) {
       act(() => {
+        height += 28
         const row = document.createElement('div')
         row.textContent = `burst ${index}`
         transcript.appendChild(row)
       })
+      await act(async () => {
+        await Promise.resolve()
+      })
+      if (index === 0) {
+        // Only microtasks have run, so no animation frame can have touched the
+        // port: the observer correction itself has to have landed the new
+        // floor. A broken observer leaves the old top here.
+        expect(port.scrollTop).toBe(height - 600)
+      }
       await act(() => vi.advanceTimersByTimeAsync(1))
     }
     await act(() => vi.advanceTimersByTimeAsync(16))
 
+    // Fake clock: this is twelve 1 ms steps plus one 16 ms frame, not wall time.
     const elapsed = performance.now() - started
     const reads = layoutReads.mock.calls.length
     // eslint-disable-next-line no-console
