@@ -478,6 +478,11 @@ const portRevisions = new WeakMap<HTMLElement, number>()
 export function invalidateSurfaceCache(port?: HTMLElement | null): void {
   if (!port) return
   portRevisions.set(port, (portRevisions.get(port) ?? 0) + 1)
+  // A keyed React move can install a new flow node while the old one is still
+  // connected inside the port. The cached hit satisfies "connected and inside
+  // the port" and would be returned forever, so drop it with the rest of the
+  // cache and let the next resolution query the DOM.
+  flowHits.delete(port)
 }
 
 function isSurfaceCacheValid(port: HTMLElement, cache: SurfaceCacheRecord): boolean {
@@ -649,8 +654,10 @@ followFlowFillUsersHost[FOLLOW_FLOW_FILL_USERS_SYMBOL] = followFlowFillUsers
 
 /**
  * `flowElementOf` is called from every guard pass and from every consumer that
- * needs the flow, several times per frame. The DOM only changes between frames,
- * so the resolved node is reused while it stays connected inside the port.
+ * needs the flow, several times per frame. The resolved node is reused while it
+ * stays connected inside the port, and `invalidateSurfaceCache` drops the hit so
+ * a flow node that React replaced inside the port is not kept past the mutation
+ * that replaced it.
  * A cached `[data-chat-flow]` is re-resolved once a transcript wrapper appears,
  * because the transcript wrapper must win.
  */
@@ -2872,22 +2879,37 @@ export function useConversationFollow(
      * A live stream delivers its mutation burst in many batches inside one
      * frame: a reveal chunk per token, plus status-counter text rewrites. Each
      * batch used to invalidate the surface cache and run a pre-paint correction
-     * immediately, and that pair rebuilds the port-wide anchor list and forces
-     * a full layout. On a long transcript that ran dozens of times a second,
-     * which the live profile showed as the engine's dominant cost. Queue it to
-     * the next animation frame instead: still before paint, at most once per
-     * frame.
+     * immediately, and that pair rebuilds the port-wide anchor list. On a long
+     * transcript that ran dozens of times a second, which the live profile
+     * showed as the engine's dominant cost.
+     *
+     * The correction still runs with the batch that requests it. A frame
+     * callback requested from inside a MutationObserver callback belongs to the
+     * NEXT frame, so deferring this pair paints one frame with the uncorrected
+     * jump; the flag only coalesces the later batches of the same frame into
+     * the first correction, and it is released on that frame's callback so the
+     * next frame corrects again.
      */
     let correctionQueued = false
     const queuePrePaintCorrection = (): void => {
       if (correctionQueued) return
       correctionQueued = true
-      requestAnimationFrame(() => {
-        correctionQueued = false
-        if (port === null) return
-        invalidateSurfaceCache(port)
+      const target = port
+      if (target !== null) {
+        invalidateSurfaceCache(target)
         restoreBeforePaint()
-      })
+      }
+      const release = (): void => {
+        correctionQueued = false
+      }
+      // A hidden tab produces no frames, and skipping its corrections would
+      // leave the position stale for the frame that brings it back. Nothing is
+      // visible there, so correct every batch instead of coalescing.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        release()
+        return
+      }
+      requestAnimationFrame(release)
     }
 
     const bindPort = (next: HTMLElement): void => {
